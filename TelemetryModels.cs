@@ -78,6 +78,7 @@ internal sealed class ViewerSettings
         new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, bool> ChannelVisibility { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
+    public List<string> ChannelOrder { get; set; } = [];
     public Dictionary<string, string> SessionLayoutAssignments { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, string> TrackMappings { get; set; } =

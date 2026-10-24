@@ -71,6 +71,7 @@ public partial class MainWindow : Window
     private int _loadGeneration;
     private int _overviewGeneration;
     private int _treeGeneration;
+    private int _activeLoads;
     private double _cursorDistanceM;
 
     public MainWindow()
@@ -224,11 +225,10 @@ public partial class MainWindow : Window
 
         _customVehicleNames = _viewerSettings.CustomVehicleNames;
         UpdateVehicleChoices();
-        RebuildTelemetryCharts();
         var selectedSession = _selectedSession;
         var selectedLocationSessions = _selectedLocation?.Sessions;
         BuildTrackLocations();
-        ApplyDistanceUnits();
+        RebuildTelemetryCharts();
 
         BuildSessionTree();
         if (selectedSession is not null)
@@ -291,7 +291,42 @@ public partial class MainWindow : Window
                 channel.Units,
                 _viewerSettings.ChannelVisibility.TryGetValue(key, out var enabled) && enabled);
         }));
-        return channels;
+        var order = _viewerSettings.ChannelOrder
+            .Select((key, index) => (key, index))
+            .GroupBy(item => item.key, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToDictionary(item => item.key, item => item.index, StringComparer.OrdinalIgnoreCase);
+        return channels
+            .Select((channel, index) => (channel, index))
+            .OrderBy(item => order.TryGetValue(item.channel.Key, out var rank) ? rank : int.MaxValue)
+            .ThenBy(item => item.index)
+            .Select(item => item.channel)
+            .ToArray();
+    }
+
+    private void BeginLoading(string detail)
+    {
+        _activeLoads++;
+        LoadingDetailText.Text = detail;
+        LoadingIndicator.Visibility = Visibility.Visible;
+    }
+
+    private void UpdateLoadingDetail(string detail)
+    {
+        if (_activeLoads > 0)
+        {
+            LoadingDetailText.Text = detail;
+        }
+    }
+
+    private void EndLoading()
+    {
+        _activeLoads = Math.Max(0, _activeLoads - 1);
+        if (_activeLoads == 0)
+        {
+            LoadingIndicator.Visibility = Visibility.Collapsed;
+            LoadingDetailText.Text = string.Empty;
+        }
     }
 
     private static int GetAiMChannelOrder(string channelName)
@@ -563,6 +598,12 @@ public partial class MainWindow : Window
                         _viewerSettings.ChannelVisibility[channelKey] = isVisible;
                     }
                 }
+                if (loadedSettings.ChannelOrder is { Count: > 0 })
+                {
+                    _viewerSettings.ChannelOrder = loadedSettings.ChannelOrder
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                }
 
                 foreach (var (alias, vehicleName) in loadedSettings.VehicleMappings ?? [])
                 {
@@ -641,8 +682,12 @@ public partial class MainWindow : Window
             return;
         }
 
+        BeginLoading("Scanning session files…");
+        try
+        {
         var treeGeneration = ++_treeGeneration;
         StatusText.Text = "Scanning session files…";
+        UpdateLoadingDetail("Finding telemetry files…");
         var performanceFiles = TelemetryLoader.EnumerateFilesRecursively(folder, "autosport-performance-*.json");
         var aimFiles = TelemetryLoader.EnumerateFilesRecursively(folder, "*.xrk");
         var files = performanceFiles.Concat(aimFiles)
@@ -664,6 +709,7 @@ public partial class MainWindow : Window
         {
             foreach (var file in files)
             {
+                Dispatcher.Invoke(() => UpdateLoadingDetail($"Reading {Path.GetFileName(file)}"));
                 try
                 {
                     loaded.Add(Path.GetExtension(file).Equals(".xrk", StringComparison.OrdinalIgnoreCase)
@@ -752,6 +798,11 @@ public partial class MainWindow : Window
         StatusText.Text = $"Loaded {_sessions.Count} sessions across {_locations.Count} tracks.";
         SelectFirstSession();
         _ = LoadFastestLapHeadersAsync(treeGeneration);
+        }
+        finally
+        {
+            EndLoading();
+        }
     }
 
     private void BuildTrackLocations()
@@ -964,6 +1015,7 @@ public partial class MainWindow : Window
                 _viewerSettings.SessionVehicleMappings, StringComparer.OrdinalIgnoreCase),
             ChannelVisibility = new Dictionary<string, bool>(
                 _viewerSettings.ChannelVisibility, StringComparer.OrdinalIgnoreCase),
+            ChannelOrder = [.. _viewerSettings.ChannelOrder],
             TrackMappings = new Dictionary<string, string>(
                 _viewerSettings.TrackMappings, StringComparer.OrdinalIgnoreCase),
             SessionLayoutAssignments = assignments
@@ -1249,6 +1301,7 @@ public partial class MainWindow : Window
         if (!_lapsBySession.TryGetValue(session.FilePath, out var laps))
         {
             StatusText.Text = $"Reading lap list from {session.FileName}…";
+            BeginLoading($"Reading laps from {session.FileName}");
             try
             {
                 if (!_lapLoadTasks.TryGetValue(session.FilePath, out var loadTask))
@@ -1269,6 +1322,10 @@ public partial class MainWindow : Window
                 MessageBox.Show(this, exception.Message, "Laps could not be loaded",
                     MessageBoxButton.OK, MessageBoxImage.Error);
                 return null;
+            }
+            finally
+            {
+                EndLoading();
             }
         }
 
@@ -1482,6 +1539,7 @@ public partial class MainWindow : Window
             SessionVehicleMappings = updatedSessionMappings,
             ChannelVisibility = new Dictionary<string, bool>(
                 _viewerSettings.ChannelVisibility, StringComparer.OrdinalIgnoreCase),
+            ChannelOrder = [.. _viewerSettings.ChannelOrder],
             TrackMappings = new Dictionary<string, string>(
                 _viewerSettings.TrackMappings, StringComparer.OrdinalIgnoreCase),
             SessionLayoutAssignments = new Dictionary<string, string>(
@@ -1817,6 +1875,7 @@ public partial class MainWindow : Window
         var primary = _primaryLap;
         var reference = _referenceLap;
         StatusText.Text = $"Loading {primary.Label} telemetry…";
+        BeginLoading($"Loading {primary.Session.FileName} · {primary.Label}");
 
         try
         {
@@ -1855,6 +1914,10 @@ public partial class MainWindow : Window
             StatusText.Text = "Could not load lap telemetry.";
             MessageBox.Show(this, exception.Message, "Lap could not be loaded",
                 MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            EndLoading();
         }
     }
 
@@ -2094,6 +2157,7 @@ public partial class MainWindow : Window
         OverviewLapCount.Text = "Counting…";
         OverviewStatusText.Text = "Loading the reference line and session statistics…";
         TrackCarStatsList.ItemsSource = Array.Empty<TrackDriverStats>();
+        BeginLoading($"Loading {location.DisplayName}");
 
         try
         {
@@ -2125,6 +2189,8 @@ public partial class MainWindow : Window
                 if (generation == _overviewGeneration)
                 {
                     OverviewStatusText.Text = $"Counting laps from session files… {completed:N0}/{location.Sessions.Count:N0}";
+                    UpdateLoadingDetail(
+                        $"Counting laps · {location.DisplayName} · {completed:N0}/{location.Sessions.Count:N0}");
                 }
             });
             var lapCounts = await GetTrackLapCountsAsync(location, progress);
@@ -2151,6 +2217,10 @@ public partial class MainWindow : Window
             _trackStatsTasks.Remove(location.Key);
             MessageBox.Show(this, exception.Message, "Track overview could not be loaded",
                 MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            EndLoading();
         }
     }
 
@@ -2313,6 +2383,7 @@ public partial class MainWindow : Window
                     _viewerSettings.SessionVehicleMappings, StringComparer.OrdinalIgnoreCase),
                 ChannelVisibility = new Dictionary<string, bool>(
                     _viewerSettings.ChannelVisibility, StringComparer.OrdinalIgnoreCase),
+                ChannelOrder = [.. _viewerSettings.ChannelOrder],
                 TrackMappings = new Dictionary<string, string>(
                     _viewerSettings.TrackMappings, StringComparer.OrdinalIgnoreCase),
                 SessionLayoutAssignments = updatedLayoutAssignments

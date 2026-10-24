@@ -80,6 +80,7 @@ internal sealed class TelemetryChart : FrameworkElement
     protected override void OnRender(DrawingContext drawingContext)
     {
         base.OnRender(drawingContext);
+        drawingContext.DrawRectangle(Brushes.Transparent, null, new Rect(RenderSize));
         var size = new Size(ActualWidth, ActualHeight);
         if (_cachedStaticDrawing is null || _cachedDrawingSize != size)
         {
@@ -95,6 +96,7 @@ internal sealed class TelemetryChart : FrameworkElement
         }
 
         drawingContext.DrawDrawing(_cachedStaticDrawing);
+        DrawCursorValues(drawingContext);
         if (double.IsFinite(_cursorDistanceM) && _cursorDistanceM >= 0 && _cursorDistanceM <= _maxDistanceM)
         {
             var plot = new Rect(55, 42, Math.Max(1, ActualWidth - 70), Math.Max(1, ActualHeight - 78));
@@ -113,7 +115,11 @@ internal sealed class TelemetryChart : FrameworkElement
         }
 
         DrawText(drawingContext, Title, 14, 10, Brushes.White, 12, FontWeights.SemiBold);
-        DrawText(drawingContext, Unit, 14, 28, TextBrush, 10);
+        var titleWidth = MeasureText(Title, 12, FontWeights.SemiBold);
+        if (!string.IsNullOrWhiteSpace(Unit))
+        {
+            DrawText(drawingContext, Unit, 14 + titleWidth + 7, 11, TextBrush, 10);
+        }
 
         var legendWidth = _lines.Sum(line => Math.Max(48, line.Label.Length * 5.2) + 17);
         var legendX = Math.Max(155, width - legendWidth - 12);
@@ -123,8 +129,8 @@ internal sealed class TelemetryChart : FrameworkElement
             {
                 DashStyle = line.Dashed ? DashStyles.Dash : DashStyles.Solid
             };
-            drawingContext.DrawLine(samplePen, new Point(legendX, 16), new Point(legendX + 14, 16));
-            DrawText(drawingContext, line.Label, legendX + 18, 10, TextBrush, 9);
+            drawingContext.DrawLine(samplePen, new Point(legendX, 30), new Point(legendX + 14, 30));
+            DrawText(drawingContext, line.Label, legendX + 18, 24, TextBrush, 9);
             legendX += Math.Max(48, line.Label.Length * 5.2) + 17;
         }
 
@@ -141,7 +147,18 @@ internal sealed class TelemetryChart : FrameworkElement
 
         var min = values.Min();
         var max = values.Max();
-        if (SymmetricRange)
+        var isRpm = Unit.Contains("rpm", StringComparison.OrdinalIgnoreCase) ||
+                    Title.Contains("rpm", StringComparison.OrdinalIgnoreCase);
+        if (isRpm)
+        {
+            min = Math.Max(0, Math.Floor(min / 500) * 500);
+            max = Math.Ceiling(max / 500) * 500;
+            if (max - min < 500)
+            {
+                max = min + 500;
+            }
+        }
+        else if (SymmetricRange)
         {
             var extent = Math.Max(Math.Abs(min), Math.Abs(max));
             min = -Math.Max(extent, 0.1);
@@ -159,17 +176,33 @@ internal sealed class TelemetryChart : FrameworkElement
             max += padding;
         }
 
-        min = Math.Min(min, 0);
-        max = Math.Max(max, 0);
+        if (!isRpm)
+        {
+            min = Math.Min(min, 0);
+            max = Math.Max(max, 0);
+        }
 
         drawingContext.DrawRectangle(null, AxisPen, plot);
-        for (var tick = 0; tick <= 4; tick++)
+        if (isRpm)
         {
-            var y = plot.Top + plot.Height * tick / 4;
-            drawingContext.DrawLine(new Pen(GridBrush, 1), new Point(plot.Left, y), new Point(plot.Right, y));
-            var value = max - (max - min) * tick / 4;
-            DrawText(drawingContext, value.ToString("0.0", CultureInfo.InvariantCulture),
-                6, y - 7, TextBrush, 9);
+            for (var value = max; value >= min; value -= 500)
+            {
+                var y = plot.Bottom - (value - min) / (max - min) * plot.Height;
+                drawingContext.DrawLine(new Pen(GridBrush, 1), new Point(plot.Left, y), new Point(plot.Right, y));
+                DrawText(drawingContext, value.ToString("N0", CultureInfo.InvariantCulture),
+                    6, y - 7, TextBrush, 9);
+            }
+        }
+        else
+        {
+            for (var tick = 0; tick <= 4; tick++)
+            {
+                var y = plot.Top + plot.Height * tick / 4;
+                drawingContext.DrawLine(new Pen(GridBrush, 1), new Point(plot.Left, y), new Point(plot.Right, y));
+                var value = max - (max - min) * tick / 4;
+                DrawText(drawingContext, value.ToString("0.0", CultureInfo.InvariantCulture),
+                    6, y - 7, TextBrush, 9);
+            }
         }
 
         for (var tick = 0; tick <= 5; tick++)
@@ -231,6 +264,87 @@ internal sealed class TelemetryChart : FrameworkElement
         drawingContext.Pop();
     }
 
+    private void DrawCursorValues(DrawingContext drawingContext)
+    {
+        if (!double.IsFinite(_cursorDistanceM))
+        {
+            return;
+        }
+
+        var titleWidth = MeasureText(Title, 12, FontWeights.SemiBold);
+        var unitWidth = MeasureText(Unit, 10, FontWeights.Normal);
+        var firstValueX = Math.Max(210, 14 + titleWidth + unitWidth + 24);
+        const double valueColumnWidth = 145;
+        for (var index = 0; index < _lines.Count; index++)
+        {
+            var line = _lines[index];
+            var value = GetValueAtDistance(line.Values, _cursorDistanceM);
+            var text = double.IsFinite(value)
+                ? $"{line.Label}: {FormatValue(value)}"
+                : $"{line.Label}: —";
+            DrawText(drawingContext, text, firstValueX + index * valueColumnWidth,
+                10, line.Color, 9, FontWeights.SemiBold);
+        }
+    }
+
+    private string FormatValue(double value)
+    {
+        var formatted = Unit.Contains("rpm", StringComparison.OrdinalIgnoreCase) ||
+                        Title.Contains("rpm", StringComparison.OrdinalIgnoreCase)
+            ? value.ToString("N0", CultureInfo.CurrentCulture)
+            : value.ToString("0.00", CultureInfo.CurrentCulture);
+        return string.IsNullOrWhiteSpace(Unit) ? formatted : $"{formatted} {Unit}";
+    }
+
+    private static double GetValueAtDistance(IReadOnlyList<ChartValue> values, double distanceM)
+    {
+        var low = 0;
+        var high = values.Count - 1;
+        while (low <= high)
+        {
+            var middle = low + (high - low) / 2;
+            if (values[middle].DistanceM < distanceM)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        if (low < values.Count && Math.Abs(values[low].DistanceM - distanceM) < 0.001)
+        {
+            return values[low].Value;
+        }
+
+        if (low == 0 || low >= values.Count)
+        {
+            return double.NaN;
+        }
+
+        var before = values[low - 1];
+        var after = values[low];
+        var span = after.DistanceM - before.DistanceM;
+        return !double.IsFinite(before.Value) || !double.IsFinite(after.Value) || span <= 0
+            ? double.NaN
+            : before.Value + (after.Value - before.Value) *
+                ((distanceM - before.DistanceM) / span);
+    }
+
+    private static double MeasureText(string text, double size, FontWeight weight)
+    {
+        var formatted = new FormattedText(
+            text,
+            CultureInfo.InvariantCulture,
+            FlowDirection.LeftToRight,
+            new Typeface(new FontFamily("Segoe UI"), FontStyles.Normal, weight, FontStretches.Normal),
+            size,
+            Brushes.White,
+            VisualTreeHelper.GetDpi(Application.Current.MainWindow!).PixelsPerDip);
+        return formatted.Width;
+    }
+
     private void HandleMouseMove(object sender, MouseEventArgs eventArgs)
     {
         var plotWidth = ActualWidth - 70;
@@ -239,12 +353,7 @@ internal sealed class TelemetryChart : FrameworkElement
             return;
         }
 
-        var x = Mouse.GetPosition(this).X;
-        if (x < 55 || x > ActualWidth - 15)
-        {
-            return;
-        }
-
+        var x = eventArgs.GetPosition(this).X;
         DistanceHovered?.Invoke(Math.Clamp((x - 55) / plotWidth * _maxDistanceM, 0, _maxDistanceM));
     }
 

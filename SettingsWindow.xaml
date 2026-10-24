@@ -1,7 +1,7 @@
 <Window x:Class="TrackTelemetryViewer.SettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Track Telemetry Settings" Width="760" Height="590"
+        Title="PitWall Settings" Width="760" Height="590"
         MinWidth="620" MinHeight="450" ResizeMode="CanResize"
         WindowStartupLocation="CenterOwner"
         Background="#11171D" Foreground="#E8EDF2" FontFamily="Segoe UI">
@@ -179,8 +179,24 @@
                              ScrollViewer.VerticalScrollBarVisibility="Auto">
                         <ListBox.ItemTemplate>
                             <DataTemplate>
-                                <CheckBox Content="{Binding Name}" IsChecked="{Binding IsEnabled}"
-                                          Foreground="#E8EDF2" Padding="4,3"/>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <CheckBox Content="{Binding Name}" IsChecked="{Binding IsEnabled}"
+                                              Foreground="#E8EDF2" Padding="0"
+                                              VerticalAlignment="Center"
+                                              VerticalContentAlignment="Center"/>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                        <Button Content="↑" Tag="{Binding}" Click="MoveChannelUp_Click"
+                                                Padding="6,1" Margin="3,0" FontSize="11"
+                                                ToolTip="Move channel up"/>
+                                        <Button Content="↓" Tag="{Binding}" Click="MoveChannelDown_Click"
+                                                Padding="6,1" Margin="3,0" FontSize="11"
+                                                ToolTip="Move channel down"/>
+                                    </StackPanel>
+                                </Grid>
                             </DataTemplate>
                         </ListBox.ItemTemplate>
                     </ListBox>

@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:TrackTelemetryViewer"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
-        Title="Track Telemetry" Width="1440" Height="920"
+        Title="PitWall" Width="1440" Height="920"
         MinWidth="1080" MinHeight="700"
         WindowStyle="None" ResizeMode="CanResize"
         Background="#11171D" Foreground="#E8EDF2"
@@ -521,12 +521,33 @@
                     <TextBlock x:Name="OverviewStatusText" Grid.Row="2" Text="Select a track or car to view its overview."
                                Foreground="{StaticResource MutedBrush}" FontSize="10" Margin="3,10,0,0"/>
                 </Grid>
+                <Grid x:Name="LoadingIndicator" Panel.ZIndex="10" Visibility="Collapsed"
+                      IsHitTestVisible="False" Background="#9911171D">
+                    <Border HorizontalAlignment="Center" VerticalAlignment="Center"
+                            Background="#202A35" BorderBrush="#394857" BorderThickness="1"
+                            CornerRadius="12" Padding="34,28" MinWidth="420">
+                        <StackPanel HorizontalAlignment="Center">
+                            <TextBlock Text="LOADING TELEMETRY" FontSize="11" FontWeight="Bold"
+                                       Foreground="{StaticResource MutedBrush}"
+                                       HorizontalAlignment="Center"/>
+                            <TextBlock x:Name="LoadingDetailText" FontSize="15"
+                                       Foreground="#E8EDF2" MaxWidth="560"
+                                       TextTrimming="CharacterEllipsis" TextAlignment="Center"
+                                       Margin="0,12,0,18"/>
+                            <ProgressBar Width="350" Height="12" IsIndeterminate="True"
+                                         Foreground="{StaticResource AccentBrush}"
+                                         Background="#293542" BorderThickness="0"/>
+                        </StackPanel>
+                    </Border>
+                </Grid>
             </Grid>
         </Grid>
 
         <Border Grid.Row="2" Background="#171E25" BorderBrush="#28323D" BorderThickness="0,1,0,0">
-            <TextBlock x:Name="StatusText" Text="Ready" FontSize="10"
-                       Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" Margin="20,0"/>
+            <Grid Margin="20,0">
+                <TextBlock x:Name="StatusText" Text="Ready" FontSize="10"
+                           Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
+            </Grid>
         </Border>
     </Grid>
 </Window>

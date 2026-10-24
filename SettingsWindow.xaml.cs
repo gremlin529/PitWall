@@ -1,10 +1,19 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Windows.Controls;
 using System.Windows;
+using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace TrackTelemetryViewer;
 
 public partial class SettingsWindow : Window
 {
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetCursorPos(int x, int y);
+
     private readonly ObservableCollection<VehicleAliasSetting> _aliases;
     private readonly ObservableCollection<TrackAliasSetting> _trackAliases;
     private readonly ObservableCollection<string> _vehicleChoices;
@@ -138,6 +147,77 @@ public partial class SettingsWindow : Window
         _vehicleChoices.Insert(index, name);
     }
 
+    private void MoveChannelUp_Click(object sender, RoutedEventArgs e) =>
+        MoveChannel(sender, -1);
+
+    private void MoveChannelDown_Click(object sender, RoutedEventArgs e) =>
+        MoveChannel(sender, 1);
+
+    private void MoveChannel(object sender, int offset)
+    {
+        if (sender is not FrameworkElement { Tag: ChartChannelSetting channel })
+        {
+            return;
+        }
+
+        var index = _channels.IndexOf(channel);
+        var targetIndex = index + offset;
+        if (index < 0 || targetIndex < 0 || targetIndex >= _channels.Count)
+        {
+            return;
+        }
+
+        _channels.Move(index, targetIndex);
+        ChannelList.SelectedItem = channel;
+        ChannelList.ScrollIntoView(channel);
+        Dispatcher.BeginInvoke(DispatcherPriority.Input, () =>
+        {
+            if (ChannelList.ItemContainerGenerator.ContainerFromItem(channel) is not ListBoxItem item)
+            {
+                return;
+            }
+
+            var arrow = offset < 0 ? "↑" : "↓";
+            var button = FindChannelButton(item, channel, arrow);
+            if (button is null || !button.IsVisible || button.ActualWidth <= 0 || button.ActualHeight <= 0)
+            {
+                return;
+            }
+
+            var screenPosition = button.PointToScreen(new Point(button.ActualWidth / 2, button.ActualHeight / 2));
+            if (!SetCursorPos((int)Math.Round(screenPosition.X), (int)Math.Round(screenPosition.Y)))
+            {
+                MessageBox.Show(this,
+                    new Win32Exception(Marshal.GetLastWin32Error()).Message,
+                    "Could not move the pointer", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            button.Focus();
+        });
+    }
+
+    private static Button? FindChannelButton(DependencyObject parent, ChartChannelSetting channel, string arrow)
+    {
+        for (var index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, index);
+            if (child is Button { Tag: ChartChannelSetting taggedChannel, Content: string content } button &&
+                ReferenceEquals(taggedChannel, channel) && content == arrow)
+            {
+                return button;
+            }
+
+            var nested = FindChannelButton(child, channel, arrow);
+            if (nested is not null)
+            {
+                return nested;
+            }
+        }
+
+        return null;
+    }
+
     private void Save_Click(object sender, RoutedEventArgs e)
     {
         var mappings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -188,6 +268,7 @@ public partial class SettingsWindow : Window
             SessionVehicleMappings = new Dictionary<string, string>(
                 Settings.SessionVehicleMappings, StringComparer.OrdinalIgnoreCase),
             ChannelVisibility = channelVisibility,
+            ChannelOrder = _channels.Select(channel => channel.Key).ToList(),
             TrackMappings = trackMappings,
             SessionLayoutAssignments = new Dictionary<string, string>(
                 Settings.SessionLayoutAssignments, StringComparer.OrdinalIgnoreCase)
