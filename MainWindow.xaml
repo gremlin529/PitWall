@@ -2,11 +2,18 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:TrackTelemetryViewer"
+        xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         Title="Track Telemetry" Width="1440" Height="920"
         MinWidth="1080" MinHeight="700"
+        WindowStyle="None" ResizeMode="CanResize"
         Background="#11171D" Foreground="#E8EDF2"
         FontFamily="Segoe UI" WindowStartupLocation="CenterScreen"
         Loaded="Window_Loaded">
+    <shell:WindowChrome.WindowChrome>
+        <shell:WindowChrome CaptionHeight="0" ResizeBorderThickness="12"
+                            CornerRadius="0" GlassFrameThickness="0"
+                            UseAeroCaptionButtons="False"/>
+    </shell:WindowChrome.WindowChrome>
     <Window.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
@@ -131,13 +138,26 @@
             <RowDefinition Height="28"/>
         </Grid.RowDefinitions>
 
-        <Border Grid.Row="0" Background="#171E25" BorderBrush="#28323D" BorderThickness="0,0,0,1">
+        <Border Grid.Row="0" Background="#171E25" BorderBrush="#28323D" BorderThickness="0,0,0,1"
+                MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
             <Grid Margin="22,0">
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                    <Border Width="28" Height="28" CornerRadius="7" Background="#15343A" Margin="0,0,11,0">
-                        <TextBlock Text="↗" Foreground="#39C3D8" FontSize="19" FontWeight="Bold"
-                                   HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,-2,0,0"/>
-                    </Border>
+                    <Viewbox Width="32" Height="32" Margin="0,0,11,0">
+                        <Canvas Width="32" Height="32">
+                            <Border Width="32" Height="32" CornerRadius="8" Background="#15343A"/>
+                            <Path Data="M 8,25 L 12,7" Stroke="#F2F5F7" StrokeThickness="1.5"
+                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                            <Path Data="M 12,7 C 15,5 18,7 23,5.5 L 22,14 C 18,15.5 15,13 10.5,15 Z"
+                                  Fill="Transparent" Stroke="#F2F5F7" StrokeThickness="1.2"
+                                  StrokeLineJoin="Round"/>
+                            <Path Data="M 12,7.8 L 15.5,7.3 M 11.5,10.3 L 22.5,9.2 M 11,13 L 22.2,12"
+                                  Stroke="#F2F5F7" StrokeThickness="0.8"/>
+                            <Path Data="M 15.5,7.3 L 15,14 M 19,6.6 L 18.5,14.3"
+                                  Stroke="#F2F5F7" StrokeThickness="0.8"/>
+                            <Path Data="M 12.1,8 L 14.7,7.6 L 14.5,9.8 L 11.7,10.1 Z M 19.5,6.5 L 22.8,5.8 L 22.5,8.7 L 19.3,9 Z M 11,11.5 L 14.3,11.2 L 14,13.8 L 10.5,14.6 Z M 18.2,11.2 L 22.3,10.8 L 22,13.4 L 18,14.1 Z"
+                                  Fill="#F2F5F7"/>
+                        </Canvas>
+                    </Viewbox>
                     <TextBlock Text="PITWALL" FontSize="14" FontWeight="Bold"
                                VerticalAlignment="Center"/>
                     <TextBlock Text="  /  TELEMETRY" Foreground="{StaticResource MutedBrush}"
@@ -151,6 +171,10 @@
                     <Button Content="⚙" Click="Settings_Click" ToolTip="Settings"
                             FontSize="17" Padding="9,3" Margin="8,0,0,0"
                             AutomationProperties.Name="Settings"/>
+                    <Button Content="×" Click="Close_Click" ToolTip="Close"
+                            FontSize="20" Padding="9,1" Margin="8,0,0,0"
+                            AutomationProperties.Name="Close"
+                            Background="#34272B" BorderBrush="#54373D"/>
                 </StackPanel>
             </Grid>
         </Border>
@@ -189,6 +213,16 @@
                             <TextBlock Text="Driver" FontSize="10" Margin="0,8,0,4"
                                        Foreground="{StaticResource MutedBrush}"/>
                             <TextBox x:Name="DriverNameBox"/>
+                            <TextBlock Text="Track / layout" FontSize="10" Margin="0,8,0,4"
+                                           Foreground="{StaticResource MutedBrush}"/>
+                            <ComboBox x:Name="SessionTrackCombo"
+                                      SelectedValuePath="Value">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding Label}"/>
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
                             <TextBlock Text="Track condition" FontSize="10" Margin="0,8,0,4"
                                            Foreground="{StaticResource MutedBrush}"/>
                             <ComboBox x:Name="TrackConditionCombo" IsEditable="True">
@@ -254,16 +288,44 @@
                         </Grid.ColumnDefinitions>
                         <Border Grid.Column="0" Background="{StaticResource PanelBrush}" CornerRadius="7" Padding="13,10">
                             <StackPanel>
-                                <TextBlock Text="SESSION A · LAP" FontSize="9" FontWeight="Bold"
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="SESSION · LAP" FontSize="9" FontWeight="Bold"
                                            Foreground="{StaticResource MutedBrush}"/>
+                                    <StackPanel Grid.Column="1" HorizontalAlignment="Right">
+                                        <TextBlock x:Name="PrimaryLapTypeText" FontSize="9" FontWeight="Bold"
+                                                   HorizontalAlignment="Right" Visibility="Collapsed"/>
+                                        <TextBlock x:Name="PrimaryLapDateText" FontSize="9"
+                                                   Foreground="{StaticResource MutedBrush}"
+                                                   HorizontalAlignment="Right" Margin="0,3,0,0"
+                                                   Visibility="Collapsed"/>
+                                    </StackPanel>
+                                </Grid>
                                 <TextBlock x:Name="PrimaryLapText" Text="—" FontSize="19"
                                                FontWeight="SemiBold" Margin="0,4,0,0"/>
                             </StackPanel>
                         </Border>
                         <Border Grid.Column="2" Background="{StaticResource PanelBrush}" CornerRadius="7" Padding="13,10">
                             <StackPanel>
-                                <TextBlock Text="REFERENCE · LAP" FontSize="9" FontWeight="Bold"
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="REFERENCE · LAP" FontSize="9" FontWeight="Bold"
                                            Foreground="{StaticResource MutedBrush}"/>
+                                    <StackPanel Grid.Column="1" HorizontalAlignment="Right">
+                                        <TextBlock x:Name="ReferenceLapTypeText" FontSize="9" FontWeight="Bold"
+                                                   HorizontalAlignment="Right" Visibility="Collapsed"/>
+                                        <TextBlock x:Name="ReferenceLapDateText" FontSize="9"
+                                                   Foreground="{StaticResource MutedBrush}"
+                                                   HorizontalAlignment="Right" Margin="0,3,0,0"
+                                                   Visibility="Collapsed"/>
+                                    </StackPanel>
+                                </Grid>
                                 <TextBlock x:Name="ReferenceLapText" Text="—" FontSize="19"
                                                FontWeight="SemiBold" Margin="0,4,0,0"/>
                             </StackPanel>
@@ -300,32 +362,9 @@
                                 ClipToBounds="True">
                             <local:TrackMap x:Name="TrackMapView"/>
                         </Border>
-                        <Grid Grid.Column="2">
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="*"/>
-                                <RowDefinition Height="9"/>
-                                <RowDefinition Height="*"/>
-                                <RowDefinition Height="9"/>
-                                <RowDefinition Height="*"/>
-                            </Grid.RowDefinitions>
-                            <Border Grid.Row="0" Background="{StaticResource PanelBrush}" CornerRadius="8"
-                                    ClipToBounds="True">
-                                <local:TelemetryChart x:Name="SpeedChart" Title="SPEED" Unit="km/h"
-                                                          DistanceHovered="Chart_DistanceHovered"/>
-                            </Border>
-                            <Border Grid.Row="2" Background="{StaticResource PanelBrush}" CornerRadius="8"
-                                    ClipToBounds="True">
-                                <local:TelemetryChart x:Name="GForceChart" Title="G-FORCE" Unit="g"
-                                                          SymmetricRange="True"
-                                                          DistanceHovered="Chart_DistanceHovered"/>
-                            </Border>
-                            <Border Grid.Row="4" Background="{StaticResource PanelBrush}" CornerRadius="8"
-                                    ClipToBounds="True">
-                                <local:TelemetryChart x:Name="DeltaChart" Title="TIME DELTA  ·  A − B" Unit="seconds"
-                                                          SymmetricRange="True"
-                                                          DistanceHovered="Chart_DistanceHovered"/>
-                            </Border>
-                        </Grid>
+                        <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto">
+                            <StackPanel x:Name="ChartListPanel"/>
+                        </ScrollViewer>
                         <TextBlock Grid.Row="1" Grid.ColumnSpan="3"
                                    Text="Move over any chart to inspect the same distance on the GPS trace and other plots."
                                    FontSize="10" Foreground="{StaticResource MutedBrush}"
@@ -399,61 +438,81 @@
                                            Foreground="{StaticResource MutedBrush}" Margin="3,16,0,8"/>
                             <ListView x:Name="TrackCarStatsList" Background="{StaticResource PanelBrush}"
                                       BorderThickness="0" Foreground="#E8EDF2"
+                                      HorizontalContentAlignment="Stretch"
                                       ScrollViewer.VerticalScrollBarVisibility="Auto">
+                                <ListView.ItemContainerStyle>
+                                    <Style TargetType="ListViewItem">
+                                        <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                        <Setter Property="Padding" Value="0"/>
+                                        <Setter Property="Margin" Value="0"/>
+                                    </Style>
+                                </ListView.ItemContainerStyle>
                                 <ListView.ItemTemplate>
                                     <DataTemplate>
-                                            <Border BorderBrush="#2B3641" BorderThickness="0,0,0,1" Padding="8,7">
-                                                <Grid>
+                                        <Border BorderBrush="#2B3641" BorderThickness="0,0,0,1"
+                                                Padding="8,7">
+                                            <StackPanel>
+                                                <Grid Margin="0,0,0,6">
                                                     <Grid.ColumnDefinitions>
                                                         <ColumnDefinition Width="*"/>
                                                         <ColumnDefinition Width="Auto"/>
-                                                        <ColumnDefinition Width="14"/>
-                                                        <ColumnDefinition Width="Auto"/>
                                                     </Grid.ColumnDefinitions>
-                                                    <StackPanel>
-                                                        <TextBlock Text="{Binding VehicleName}" FontSize="12"
-                                                                   FontWeight="SemiBold"/>
-                                                        <TextBlock Text="{Binding DriverName}" FontSize="10"
-                                                                   Foreground="{StaticResource AccentBrush}" Margin="0,3,0,0"/>
-                                                        <TextBlock Text="{Binding Conditions}" FontSize="10"
-                                                                   Foreground="{StaticResource MutedBrush}" Margin="0,3,0,0"/>
-                                                    </StackPanel>
-                                                    <StackPanel Grid.Column="1" VerticalAlignment="Center"
-                                                                Margin="10,0,0,0">
-                                                        <TextBlock Text="{Binding Sessions, StringFormat={}{0} sessions}"
-                                                                   FontSize="10" HorizontalAlignment="Right"/>
-                                                        <TextBlock Text="{Binding Laps, StringFormat={}{0} laps}"
-                                                                   FontSize="10" Foreground="{StaticResource MutedBrush}"
-                                                                   HorizontalAlignment="Right" Margin="0,3,0,0"/>
-                                                    </StackPanel>
-                                                    <StackPanel Grid.Column="3" VerticalAlignment="Center"
-                                                                MinWidth="132">
-                                                        <Button Content="{Binding FastestLapLabel}"
-                                                                Tag="{Binding FastestLap}"
-                                                                ToolTip="{Binding FastestLapToolTip}"
-                                                                Click="TrackLapLink_Click"
-                                                                IsEnabled="{Binding HasFastestLap}"
-                                                                Foreground="LimeGreen"
-                                                                Background="Transparent"
-                                                                BorderThickness="0"
-                                                                Padding="0"
-                                                                FontSize="10"
-                                                                HorizontalContentAlignment="Right"/>
-                                                        <Button Content="{Binding OptimalLapLabel}"
-                                                                Tag="{Binding OptimalLap}"
-                                                                ToolTip="{Binding OptimalLapToolTip}"
-                                                                Click="TrackLapLink_Click"
-                                                                IsEnabled="{Binding HasOptimalLap}"
-                                                                Foreground="MediumPurple"
-                                                                Background="Transparent"
-                                                                BorderThickness="0"
-                                                                Padding="0"
-                                                                FontSize="10"
-                                                                HorizontalContentAlignment="Right"
-                                                                Margin="0,3,0,0"/>
-                                                    </StackPanel>
+                                                    <TextBlock Text="{Binding DriverName}" FontSize="12"
+                                                               FontWeight="SemiBold"/>
+                                                    <TextBlock Grid.Column="1"
+                                                               Text="{Binding Laps, StringFormat={}{0} laps}"
+                                                               FontSize="10" Foreground="{StaticResource MutedBrush}"
+                                                               VerticalAlignment="Center"/>
                                                 </Grid>
-                                            </Border>
+                                                <ItemsControl ItemsSource="{Binding Cars}">
+                                                    <ItemsControl.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <Grid Margin="8,3,0,3">
+                                                                <Grid.ColumnDefinitions>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                    <ColumnDefinition Width="160"/>
+                                                                </Grid.ColumnDefinitions>
+                                                                <StackPanel VerticalAlignment="Center">
+                                                                    <TextBlock Text="{Binding VehicleName}"
+                                                                               FontSize="10"
+                                                                               Foreground="{StaticResource AccentBrush}"/>
+                                                                    <TextBlock Text="{Binding Sessions, StringFormat={}{0} sessions}"
+                                                                               FontSize="9"
+                                                                               Foreground="{StaticResource MutedBrush}"/>
+                                                                </StackPanel>
+                                                                <StackPanel Grid.Column="1"
+                                                                            VerticalAlignment="Center"
+                                                                            HorizontalAlignment="Stretch">
+                                                                    <Button Content="{Binding FastestLapLabel}"
+                                                                            Tag="{Binding FastestLap}"
+                                                                            ToolTip="{Binding FastestLapToolTip}"
+                                                                            Click="TrackLapLink_Click"
+                                                                            IsEnabled="{Binding HasFastestLap}"
+                                                                            Foreground="LimeGreen"
+                                                                            Background="Transparent"
+                                                                            BorderThickness="0"
+                                                                            Padding="0"
+                                                                            FontSize="9"
+                                                                            HorizontalContentAlignment="Right"/>
+                                                                    <Button Content="{Binding OptimalLapLabel}"
+                                                                            Tag="{Binding OptimalLap}"
+                                                                            ToolTip="{Binding OptimalLapToolTip}"
+                                                                            Click="TrackLapLink_Click"
+                                                                            IsEnabled="{Binding HasOptimalLap}"
+                                                                            Foreground="MediumPurple"
+                                                                            Background="Transparent"
+                                                                            BorderThickness="0"
+                                                                            Padding="0"
+                                                                            FontSize="9"
+                                                                            HorizontalContentAlignment="Right"
+                                                                            Margin="0,2,0,0"/>
+                                                                </StackPanel>
+                                                            </Grid>
+                                                        </DataTemplate>
+                                                    </ItemsControl.ItemTemplate>
+                                                </ItemsControl>
+                                            </StackPanel>
+                                        </Border>
                                     </DataTemplate>
                                 </ListView.ItemTemplate>
                             </ListView>

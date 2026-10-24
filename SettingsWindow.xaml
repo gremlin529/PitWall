@@ -162,7 +162,30 @@
             </ComboBox>
         </Grid>
 
-        <TabControl Grid.Row="2">
+        <TabControl Grid.Row="2" SelectedIndex="0">
+            <TabItem Header="Channels">
+                <Grid Margin="10">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <StackPanel Margin="0,0,0,8">
+                        <TextBlock Text="TELEMETRY GRAPHS" FontSize="10" FontWeight="Bold"
+                                   Foreground="#94A0AD"/>
+                        <TextBlock Text="Choose which distance-based graphs appear on the main page."
+                                   Foreground="#94A0AD" FontSize="10" Margin="0,4,0,0"/>
+                    </StackPanel>
+                    <ListBox x:Name="ChannelList" Grid.Row="1"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <CheckBox Content="{Binding Name}" IsChecked="{Binding IsEnabled}"
+                                          Foreground="#E8EDF2" Padding="4,3"/>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </Grid>
+            </TabItem>
             <TabItem Header="Cars">
                 <Grid Margin="10">
                     <Grid.RowDefinitions>

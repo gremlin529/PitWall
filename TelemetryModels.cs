@@ -22,7 +22,8 @@ internal sealed record SessionInfo(
     double MeanlineLengthM,
     string? OptimalLapPath,
     double OptimalLapDurationMs,
-    double OptimalLapStartTimeSessionMs)
+    double OptimalLapStartTimeSessionMs,
+    AiMSessionData? AiMData = null)
 {
     public string SessionLabel => LocalStart.ToString("h:mm tt");
     public string DateLabel => LocalStart.ToString("MMMM d, yyyy");
@@ -30,6 +31,34 @@ internal sealed record SessionInfo(
     public string DefaultVehicleName => string.IsNullOrWhiteSpace(VehicleAlias)
         ? "Unassigned vehicle"
         : $"Unassigned · {VehicleAlias[..Math.Min(VehicleAlias.Length, 8)].ToUpperInvariant()}";
+}
+
+internal sealed record AiMSessionData(
+    string DriverName,
+    string VehicleName,
+    string TrackName,
+    IReadOnlyList<AiMLapData> Laps);
+
+internal sealed record AiMLapData(
+    int Number,
+    double StartTimeMs,
+    double DurationMs,
+    IReadOnlyList<TelemetryPoint> Points,
+    IReadOnlyList<AiMChannelData> Channels);
+
+internal sealed record AiMChannelData(
+    string Name,
+    string Units,
+    IReadOnlyList<AiMChannelSample> Samples);
+
+internal sealed record AiMChannelSample(double TimeMs, double Value);
+
+internal sealed class ChartChannelSetting(string key, string name, string units, bool isEnabled)
+{
+    public string Key { get; } = key;
+    public string Name { get; } = name;
+    public string Units { get; } = units;
+    public bool IsEnabled { get; set; } = isEnabled;
 }
 
 internal sealed record SessionEdits(
@@ -44,6 +73,10 @@ internal sealed class ViewerSettings
     public List<string> CustomVehicleNames { get; set; } = [];
     public List<string> HiddenVehicleNames { get; set; } = [];
     public Dictionary<string, string> VehicleMappings { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, string> SessionVehicleMappings { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, bool> ChannelVisibility { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, string> SessionLayoutAssignments { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
@@ -137,12 +170,16 @@ internal sealed record TrackDriverGroup(
 
 internal sealed record TrackDateGroup(DateTime Date, IReadOnlyList<SessionInfo> Sessions);
 
+internal sealed record SessionLayoutChoice(string Label, string Value);
+
+internal sealed record TrackDriverStats(
+    string DriverName,
+    string Laps,
+    IReadOnlyList<TrackCarStats> Cars);
+
 internal sealed record TrackCarStats(
     string VehicleName,
-    string DriverName,
     int Sessions,
-    string Laps,
-    string Conditions,
     LapNavigationTarget? FastestLap,
     LapNavigationTarget? OptimalLap)
 {
@@ -224,6 +261,63 @@ internal sealed record SessionTrace(LapInfo Lap, IReadOnlyList<TelemetryPoint> P
     public SessionInfo Session => Lap.Session;
     public double LapDurationSeconds => Lap.DurationMs / 1000d;
     public double DistanceM => Points.Count == 0 ? 0 : Points[^1].DistanceM;
+
+    public IReadOnlyList<ChartValue> GetChannelValues(string channelName)
+    {
+        if (Lap.Session.AiMData is not { } aimData ||
+            Lap.Index < 0 || Lap.Index >= aimData.Laps.Count)
+        {
+            return [];
+        }
+
+        var channel = aimData.Laps[Lap.Index].Channels.FirstOrDefault(candidate =>
+            candidate.Name.Equals(channelName, StringComparison.OrdinalIgnoreCase));
+        if (channel is null)
+        {
+            return [];
+        }
+
+        return channel.Samples.Select(sample => new ChartValue(
+                InterpolateDistanceM(Points, sample.TimeMs),
+                sample.Value))
+            .ToArray();
+    }
+
+    private static double InterpolateDistanceM(IReadOnlyList<TelemetryPoint> points, double timeMs)
+    {
+        var low = 0;
+        var high = points.Count - 1;
+        while (low <= high)
+        {
+            var middle = low + (high - low) / 2;
+            if (points[middle].TimeMs < timeMs)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        if (low == 0)
+        {
+            return points[0].DistanceM;
+        }
+
+        if (low >= points.Count)
+        {
+            return points[^1].DistanceM;
+        }
+
+        var before = points[low - 1];
+        var after = points[low];
+        var span = after.TimeMs - before.TimeMs;
+        return span <= 0
+            ? after.DistanceM
+            : before.DistanceM + (after.DistanceM - before.DistanceM) *
+                ((timeMs - before.TimeMs) / span);
+    }
 }
 
 internal sealed record ChartValue(double DistanceM, double Value);

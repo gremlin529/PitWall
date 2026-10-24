@@ -1,0 +1,8 @@
+[package]
+name = "xrk-reader"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libxrk = { git = "https://github.com/m3rlin45/libxrk", rev = "4e44d38debc9445b8e5446c9b7a241f5730ac920" }
+serde_json = "1"

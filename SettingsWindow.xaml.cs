@@ -9,6 +9,7 @@ public partial class SettingsWindow : Window
     private readonly ObservableCollection<TrackAliasSetting> _trackAliases;
     private readonly ObservableCollection<string> _vehicleChoices;
     private readonly ObservableCollection<VehicleVisibilitySetting> _vehicles;
+    private readonly ObservableCollection<ChartChannelSetting> _channels;
     private readonly HashSet<string> _catalogVehicleNames;
     private readonly HashSet<string> _customVehicleNames;
     private readonly HashSet<string> _hiddenVehicleNames;
@@ -18,7 +19,8 @@ public partial class SettingsWindow : Window
         IEnumerable<string> aliases,
         IEnumerable<TrackAliasSetting> trackAliases,
         IEnumerable<string> vehicleNames,
-        IEnumerable<string> catalogVehicleNames)
+        IEnumerable<string> catalogVehicleNames,
+        IEnumerable<ChartChannelSetting> channels)
     {
         InitializeComponent();
         _customVehicleNames = new HashSet<string>(settings.CustomVehicleNames, StringComparer.CurrentCultureIgnoreCase);
@@ -33,6 +35,7 @@ public partial class SettingsWindow : Window
             .Where(name => !_hiddenVehicleNames.Contains(name)));
         _vehicles = new ObservableCollection<VehicleVisibilitySetting>(allVehicleNames
             .Select(name => new VehicleVisibilitySetting(name, _hiddenVehicleNames.Contains(name))));
+        _channels = new ObservableCollection<ChartChannelSetting>(channels);
         _catalogVehicleNames = new HashSet<string>(catalogVehicleNames, StringComparer.CurrentCultureIgnoreCase);
         _aliases = new ObservableCollection<VehicleAliasSetting>(aliases
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -47,6 +50,7 @@ public partial class SettingsWindow : Window
         AliasList.ItemsSource = _aliases;
         TrackAliasList.ItemsSource = _trackAliases;
         VehicleNameList.ItemsSource = _vehicles;
+        ChannelList.ItemsSource = _channels;
         DistanceUnitCombo.SelectedIndex = settings.DistanceUnits.Equals("Imperial", StringComparison.OrdinalIgnoreCase)
             ? 1
             : 0;
@@ -152,7 +156,7 @@ public partial class SettingsWindow : Window
         {
             var name = alias.Name.Trim();
             if (string.IsNullOrWhiteSpace(name) ||
-                name.Equals(alias.DefaultName, StringComparison.CurrentCultureIgnoreCase))
+                name.Equals(alias.DefaultName, StringComparison.Ordinal))
             {
                 trackMappings.Remove(alias.Key);
             }
@@ -160,6 +164,13 @@ public partial class SettingsWindow : Window
             {
                 trackMappings[alias.Key] = name;
             }
+        }
+
+        var channelVisibility = new Dictionary<string, bool>(
+            Settings.ChannelVisibility, StringComparer.OrdinalIgnoreCase);
+        foreach (var channel in _channels)
+        {
+            channelVisibility[channel.Key] = channel.IsEnabled;
         }
 
         Settings = new ViewerSettings
@@ -174,6 +185,9 @@ public partial class SettingsWindow : Window
                 .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase)
                 .ToList(),
             VehicleMappings = mappings,
+            SessionVehicleMappings = new Dictionary<string, string>(
+                Settings.SessionVehicleMappings, StringComparer.OrdinalIgnoreCase),
+            ChannelVisibility = channelVisibility,
             TrackMappings = trackMappings,
             SessionLayoutAssignments = new Dictionary<string, string>(
                 Settings.SessionLayoutAssignments, StringComparer.OrdinalIgnoreCase)

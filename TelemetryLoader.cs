@@ -1,6 +1,8 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Buffers.Text;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -60,6 +62,10 @@ internal static partial class TelemetryLoader
 
     public static IEnumerable<string> EnumerateFilesRecursively(string folder, string pattern) =>
         Directory.EnumerateFiles(folder, pattern, SearchOption.AllDirectories);
+
+    public static bool HasSessionFiles(string folder) =>
+        EnumerateFilesRecursively(folder, "autosport-performance-*.json").Any() ||
+        EnumerateFilesRecursively(folder, "*.xrk").Any();
 
     public static IReadOnlyDictionary<string, IReadOnlyList<string>> BuildDataFileIndex(string folder) =>
         EnumerateFilesRecursively(folder, "autosport-*.json")
@@ -131,6 +137,310 @@ internal static partial class TelemetryLoader
             ReadOptionalDouble(LapDurationRegex(), optimalLapText),
             ReadOptionalDouble(LapStartTimeRegex(), optimalLapText));
     }
+
+    public static SessionInfo ReadAiMSessionInfo(string filePath)
+    {
+        var readerPath = Path.Combine(AppContext.BaseDirectory, "XrkReader.exe");
+        if (!File.Exists(readerPath))
+        {
+            throw new FileNotFoundException(
+                $"The bundled AiM XRK reader was not found at {readerPath}.", readerPath);
+        }
+
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = readerPath,
+            ArgumentList = { filePath },
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
+        }) ?? throw new InvalidOperationException("Could not start the bundled AiM XRK reader.");
+
+        var outputTask = process.StandardOutput.ReadToEndAsync();
+        var errorTask = process.StandardError.ReadToEndAsync();
+        process.WaitForExit();
+        var output = outputTask.GetAwaiter().GetResult();
+        var error = errorTask.GetAwaiter().GetResult();
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidDataException(
+                $"Could not read {Path.GetFileName(filePath)} as an AiM XRK session. " +
+                $"{error.Trim()}");
+        }
+
+        using var document = JsonDocument.Parse(output);
+        var root = document.RootElement;
+        var samples = root.GetProperty("samples").EnumerateArray()
+            .Select(sample => new XrkSample(
+                GetNumber(sample, "timeMs"),
+                GetNumber(sample, "latitude"),
+                GetNumber(sample, "longitude"),
+                GetNumber(sample, "speedMps"),
+                GetNumber(sample, "longitudinalG"),
+                GetNumber(sample, "lateralG")))
+            .Where(sample => double.IsFinite(sample.TimeMs) &&
+                             double.IsFinite(sample.Latitude) &&
+                             double.IsFinite(sample.Longitude) &&
+                             sample.Latitude is >= -90 and <= 90 &&
+                             sample.Longitude is >= -180 and <= 180)
+            .OrderBy(sample => sample.TimeMs)
+            .ToArray();
+        if (samples.Length < 2)
+        {
+            throw new InvalidDataException(
+                $"No usable GPS positions were found in {Path.GetFileName(filePath)}.");
+        }
+
+        var trackName = GetString(root, "venue");
+        if (string.IsNullOrWhiteSpace(trackName))
+        {
+            trackName = "AiM track";
+        }
+
+        var channels = ReadAiMChannels(root);
+        var laps = ReadAiMLaps(root, samples, channels);
+        if (laps.Count == 0)
+        {
+            laps = [CreateAiMFallbackLap(samples, channels)];
+        }
+
+        var sessionId = Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(filePath).ToUpperInvariant())))
+            .ToLowerInvariant();
+        var localStart = ReadAiMStartTime(root, filePath);
+        var locationLatitude = samples.Average(sample => sample.Latitude);
+        var locationLongitude = samples.Average(sample => sample.Longitude);
+        var trackLengthM = laps.Max(lap => lap.Points[^1].DistanceM);
+        var sourceVehicle = GetString(root, "vehicle");
+        var sourceDriver = GetString(root, "driver");
+        var sessionType = GetString(root, "session");
+
+        return new SessionInfo(
+            filePath,
+            Path.GetFileName(filePath),
+            sessionId,
+            string.Empty,
+            null,
+            locationLatitude,
+            locationLongitude,
+            localStart,
+            Math.Max(0, samples[^1].TimeMs - samples[0].TimeMs) / 1000d,
+            string.Empty,
+            "UNKNOWN",
+            string.IsNullOrWhiteSpace(sessionType) ? "AiM" : sessionType,
+            null,
+            trackName.Trim(),
+            string.Empty,
+            trackLengthM,
+            null,
+            0,
+            0,
+            new AiMSessionData(sourceDriver, sourceVehicle, trackName.Trim(), laps));
+    }
+
+    private static IReadOnlyList<AiMLapData> ReadAiMLaps(
+        JsonElement root,
+        IReadOnlyList<XrkSample> samples,
+        IReadOnlyList<XrkChannel> channels)
+    {
+        if (!root.TryGetProperty("laps", out var lapsElement) ||
+            lapsElement.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var reportedLaps = lapsElement.EnumerateArray()
+            .Select(lap => new XrkLap(
+                (int)GetNumber(lap, "number", -1),
+                GetNumber(lap, "startTimeMs"),
+                GetNumber(lap, "endTimeMs"),
+                GetString(lap, "type")))
+            .Where(lap => double.IsFinite(lap.StartTimeMs) &&
+                          double.IsFinite(lap.EndTimeMs) &&
+                          lap.EndTimeMs > lap.StartTimeMs)
+            .ToArray();
+        var fullLaps = reportedLaps
+            .Where(lap => lap.Type.Equals("full", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        var selectedLaps = fullLaps.Length > 0
+            ? fullLaps
+            : reportedLaps.Where(lap =>
+                !lap.Type.Equals("in", StringComparison.OrdinalIgnoreCase) &&
+                !lap.Type.Equals("out", StringComparison.OrdinalIgnoreCase)).ToArray();
+
+        var result = new List<AiMLapData>(selectedLaps.Length);
+        foreach (var (lap, index) in selectedLaps.Select((lap, index) => (lap, index)))
+        {
+            var lapSamples = samples
+                .Where(sample => sample.TimeMs >= lap.StartTimeMs && sample.TimeMs <= lap.EndTimeMs)
+                .ToArray();
+            var points = CreateAiMPoints(lapSamples, lap.StartTimeMs);
+            if (points.Count < 2)
+            {
+                continue;
+            }
+
+            var lapChannels = CreateAiMLapChannels(channels, lap.StartTimeMs, lap.EndTimeMs);
+            result.Add(new AiMLapData(
+                lap.Number > 0 ? lap.Number : index + 1,
+                lap.StartTimeMs,
+                lap.EndTimeMs - lap.StartTimeMs,
+                points,
+                lapChannels));
+        }
+
+        return result;
+    }
+
+    private static AiMLapData CreateAiMFallbackLap(
+        IReadOnlyList<XrkSample> samples,
+        IReadOnlyList<XrkChannel> channels)
+    {
+        var startTimeMs = samples[0].TimeMs;
+        var points = CreateAiMPoints(samples, startTimeMs);
+        var lapChannels = CreateAiMLapChannels(channels, startTimeMs, samples[^1].TimeMs);
+        return new AiMLapData(
+            1, startTimeMs, samples[^1].TimeMs - startTimeMs, points, lapChannels);
+    }
+
+    private static IReadOnlyList<XrkChannel> ReadAiMChannels(JsonElement root)
+    {
+        if (!root.TryGetProperty("channels", out var channelsElement) ||
+            channelsElement.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        return channelsElement.EnumerateArray()
+            .Select(channel => new XrkChannel(
+                GetString(channel, "name"),
+                GetString(channel, "units"),
+                channel.TryGetProperty("samples", out var samplesElement) &&
+                samplesElement.ValueKind == JsonValueKind.Array
+                    ? samplesElement.EnumerateArray()
+                        .Where(sample => sample.ValueKind == JsonValueKind.Array &&
+                                         sample.GetArrayLength() == 2)
+                        .Select(sample => new AiMChannelSample(
+                            sample[0].GetDouble(),
+                            sample[1].GetDouble()))
+                        .Where(sample => double.IsFinite(sample.TimeMs) && double.IsFinite(sample.Value))
+                        .OrderBy(sample => sample.TimeMs)
+                        .ToArray()
+                    : []))
+            .Where(channel => !string.IsNullOrWhiteSpace(channel.Name) && channel.Samples.Count > 0)
+            .ToArray();
+    }
+
+    private static IReadOnlyList<AiMChannelData> CreateAiMLapChannels(
+        IReadOnlyList<XrkChannel> channels,
+        double lapStartTimeMs,
+        double lapEndTimeMs) =>
+        channels.Select(channel => new AiMChannelData(
+                channel.Name,
+                channel.Units,
+                channel.Samples
+                    .Where(sample => sample.TimeMs >= lapStartTimeMs && sample.TimeMs <= lapEndTimeMs)
+                    .Select(sample => sample with { TimeMs = sample.TimeMs - lapStartTimeMs })
+                    .ToArray()))
+            .Where(channel => channel.Samples.Count > 0)
+            .ToArray();
+
+    private static IReadOnlyList<TelemetryPoint> CreateAiMPoints(
+        IReadOnlyList<XrkSample> samples,
+        double lapStartTimeMs)
+    {
+        var points = new List<TelemetryPoint>(samples.Count);
+        var distanceM = 0d;
+        XrkSample? previous = null;
+        foreach (var sample in samples)
+        {
+            if (previous is not null)
+            {
+                distanceM += DistanceBetweenMeters(
+                    previous.Latitude, previous.Longitude, sample.Latitude, sample.Longitude);
+            }
+
+            points.Add(new TelemetryPoint(
+                distanceM,
+                sample.TimeMs - lapStartTimeMs,
+                double.IsFinite(sample.SpeedMps) ? Math.Max(0, sample.SpeedMps) : double.NaN,
+                double.IsFinite(sample.LongitudinalG) ? sample.LongitudinalG : double.NaN,
+                double.IsFinite(sample.LateralG) ? sample.LateralG : double.NaN,
+                sample.Latitude,
+                sample.Longitude));
+            previous = sample;
+        }
+
+        return points;
+    }
+
+    private static double DistanceBetweenMeters(
+        double latitudeA,
+        double longitudeA,
+        double latitudeB,
+        double longitudeB)
+    {
+        const double earthRadiusM = 6_371_000;
+        var latitudeDelta = DegreesToRadians(latitudeB - latitudeA);
+        var longitudeDelta = DegreesToRadians(longitudeB - longitudeA);
+        var a = Math.Pow(Math.Sin(latitudeDelta / 2), 2) +
+                Math.Cos(DegreesToRadians(latitudeA)) * Math.Cos(DegreesToRadians(latitudeB)) *
+                Math.Pow(Math.Sin(longitudeDelta / 2), 2);
+        return earthRadiusM * 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
+    }
+
+    private static double DegreesToRadians(double degrees) => degrees * Math.PI / 180;
+
+    private static DateTime ReadAiMStartTime(JsonElement root, string filePath)
+    {
+        var date = GetString(root, "logDate");
+        var time = GetString(root, "logTime");
+        if (!string.IsNullOrWhiteSpace(date) &&
+            DateTime.TryParse(
+                $"{date} {time}",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AllowWhiteSpaces,
+                out var metadataTime))
+        {
+            return DateTime.SpecifyKind(metadataTime, DateTimeKind.Unspecified);
+        }
+
+        var name = Path.GetFileNameWithoutExtension(filePath);
+        var dateTimeSeparator = name.IndexOf('_');
+        if (dateTimeSeparator > 0 && dateTimeSeparator + 7 <= name.Length)
+        {
+            var timestamp = $"{name[..dateTimeSeparator]}_{name.Substring(dateTimeSeparator + 1, 6)}";
+            if (DateTime.TryParseExact(
+                    timestamp,
+                    "yyyyMMdd_HHmmss",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.None,
+                    out var fileTime))
+            {
+                return fileTime;
+            }
+        }
+
+        return File.GetLastWriteTime(filePath);
+    }
+
+    private sealed record XrkSample(
+        double TimeMs,
+        double Latitude,
+        double Longitude,
+        double SpeedMps,
+        double LongitudinalG,
+        double LateralG);
+
+    private sealed record XrkLap(int Number, double StartTimeMs, double EndTimeMs, string Type);
+
+    private sealed record XrkChannel(
+        string Name,
+        string Units,
+        IReadOnlyList<AiMChannelSample> Samples);
 
     public static void WriteTrackCondition(string metadataPath, string trackCondition)
     {
@@ -414,6 +724,19 @@ internal static partial class TelemetryLoader
 
     public static IReadOnlyList<LapInfo> ReadLaps(SessionInfo session)
     {
+        if (session.AiMData is { } aiMData)
+        {
+            return aiMData.Laps
+                .Select((lap, index) => new LapInfo(
+                    session,
+                    index,
+                    false,
+                    $"Lap {lap.Number}",
+                    lap.DurationMs,
+                    lap.StartTimeMs))
+                .ToArray();
+        }
+
         using var stream = File.OpenRead(session.FilePath);
         using var document = JsonDocument.Parse(stream);
         var root = document.RootElement;
@@ -485,6 +808,17 @@ internal static partial class TelemetryLoader
 
     public static SessionTrace ReadTrace(LapInfo selectedLap)
     {
+        if (selectedLap.Session.AiMData is { } aiMData)
+        {
+            if (selectedLap.Index < 0 || selectedLap.Index >= aiMData.Laps.Count)
+            {
+                throw new InvalidDataException(
+                    $"Lap {selectedLap.Index + 1} was not found in {selectedLap.Session.FileName}.");
+            }
+
+            return new SessionTrace(selectedLap, aiMData.Laps[selectedLap.Index].Points);
+        }
+
         var filePath = selectedLap.DataFilePath ?? selectedLap.Session.FilePath;
         using var stream = File.OpenRead(filePath);
         using var document = JsonDocument.Parse(stream);
