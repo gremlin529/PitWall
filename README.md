@@ -35,6 +35,7 @@ The viewer automatically looks for a `Data` folder beside the application or pro
 - Right-click a vehicle node to assign a catalog car name to its metadata alias. These alias-to-name mappings are saved in `viewer-settings.json` in the selected data folder and reused the next time it is loaded.
 - The track tree nodes have visible expand/collapse controls.
 - The track overview counts laps in the background by scanning session telemetry files.
+- Track overviews show a separate car-and-driver summary with each driver's session and lap counts plus clickable fastest and optimal laps. Each driver node shows that driver's optimal lap time and opens the optimal lap when selected.
 - View every driven lap for each session, with the average lap used if no driven laps are available.
 - Right-click a lap and choose **Use as reference lap** to compare it with the selected lap. The GPS traces and speed/acceleration plots are overlaid; the delta is session A elapsed time minus reference elapsed time at the same distance.
 - Hover over a plot to move the distance cursor across the plots and GPS map.

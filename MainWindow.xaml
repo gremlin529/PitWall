@@ -395,7 +395,7 @@
                                     </StackPanel>
                                 </Border>
                             </UniformGrid>
-                            <TextBlock Text="VEHICLES &amp; CONDITIONS" FontSize="10" FontWeight="Bold"
+                            <TextBlock Text="CARS &amp; DRIVERS" FontSize="10" FontWeight="Bold"
                                            Foreground="{StaticResource MutedBrush}" Margin="3,16,0,8"/>
                             <ListView x:Name="TrackCarStatsList" Background="{StaticResource PanelBrush}"
                                       BorderThickness="0" Foreground="#E8EDF2"
@@ -413,7 +413,7 @@
                                                     <StackPanel>
                                                         <TextBlock Text="{Binding VehicleName}" FontSize="12"
                                                                    FontWeight="SemiBold"/>
-                                                        <TextBlock Text="{Binding Drivers}" FontSize="10"
+                                                        <TextBlock Text="{Binding DriverName}" FontSize="10"
                                                                    Foreground="{StaticResource AccentBrush}" Margin="0,3,0,0"/>
                                                         <TextBlock Text="{Binding Conditions}" FontSize="10"
                                                                    Foreground="{StaticResource MutedBrush}" Margin="0,3,0,0"/>

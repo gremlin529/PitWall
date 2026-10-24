@@ -3,6 +3,7 @@ using System.IO;
 using System.Buffers.Text;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
 namespace TrackTelemetryViewer;
@@ -114,6 +115,7 @@ internal static partial class TelemetryLoader
             Path.GetFileName(filePath),
             sessionGuid,
             ReadOptionalString(GarminGuidRegex(), metadataText),
+            metadataPath,
             latitude,
             longitude,
             localStart,
@@ -128,6 +130,18 @@ internal static partial class TelemetryLoader
             optimalLapPath,
             ReadOptionalDouble(LapDurationRegex(), optimalLapText),
             ReadOptionalDouble(LapStartTimeRegex(), optimalLapText));
+    }
+
+    public static void WriteTrackCondition(string metadataPath, string trackCondition)
+    {
+        var metadata = JsonNode.Parse(File.ReadAllText(metadataPath)) as JsonObject
+                       ?? throw new InvalidDataException(
+                           $"Session metadata in {Path.GetFileName(metadataPath)} is not a JSON object.");
+        metadata["trackCondition"] = trackCondition;
+        File.WriteAllText(metadataPath, metadata.ToJsonString(new JsonSerializerOptions
+        {
+            WriteIndented = true
+        }));
     }
 
     public static IReadOnlyList<TrackPoint> ReadMeanlinePoints(string filePath)

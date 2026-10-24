@@ -790,16 +790,6 @@ public partial class MainWindow : Window
                     Foreground = new SolidColorBrush(Color.FromRgb(151, 164, 177))
                 };
 
-                var optimalLap = carSessions
-                    .Select(TelemetryLoader.CreateOptimalLap)
-                    .OfType<LapInfo>()
-                    .Where(lap => double.IsFinite(lap.DurationMs) && lap.DurationMs > 0)
-                    .MinBy(lap => lap.DurationMs);
-                if (optimalLap is not null)
-                {
-                    carNode.Items.Add(CreateLapTreeNode(optimalLap, Brushes.MediumPurple));
-                }
-
                 carNode.ContextMenu = CreateVehicleContextMenu((TrackCarGroup)carNode.Tag);
 
                 foreach (var driverGroup in carSessions
@@ -807,27 +797,61 @@ public partial class MainWindow : Window
                              .OrderBy(group => group.Key, StringComparer.CurrentCultureIgnoreCase))
                 {
                     var driverSessions = driverGroup.OrderBy(session => session.LocalStart).ToArray();
+                    var optimalLap = driverSessions
+                        .Select(TelemetryLoader.CreateOptimalLap)
+                        .OfType<LapInfo>()
+                        .Where(lap => double.IsFinite(lap.DurationMs) && lap.DurationMs > 0)
+                        .MinBy(lap => lap.DurationMs);
+                    var driverHeader = new StackPanel
+                    {
+                        Orientation = Orientation.Horizontal,
+                        VerticalAlignment = VerticalAlignment.Center
+                    };
+                    driverHeader.Children.Add(new TextBlock
+                    {
+                        Text = $"{driverGroup.Key}  ({driverSessions.Length})",
+                        VerticalAlignment = VerticalAlignment.Center
+                    });
+                    if (optimalLap is not null)
+                    {
+                        driverHeader.Children.Add(new TextBlock
+                        {
+                            Text = $"  ·  Optimal {FormatLapTime(optimalLap.DurationMs / 1000d)}",
+                            Foreground = Brushes.MediumPurple,
+                            Margin = new Thickness(6, 0, 0, 0),
+                            VerticalAlignment = VerticalAlignment.Center
+                        });
+                    }
+
                     var driverNode = new TreeViewItem
                     {
-                        Header = $"{driverGroup.Key}  ({driverSessions.Length})",
-                        Tag = new TrackDriverGroup(driverGroup.Key, driverSessions),
+                        Header = driverHeader,
+                        Tag = new TrackDriverGroup(driverGroup.Key, driverSessions, optimalLap),
                         IsExpanded = false,
                         FontWeight = FontWeights.Normal,
                         Foreground = new SolidColorBrush(Color.FromRgb(151, 164, 177))
                     };
+                    if (optimalLap is not null)
+                    {
+                        driverNode.ContextMenu = CreateLapContextMenu(optimalLap);
+                    }
 
                     foreach (var dateGroup in driverSessions.GroupBy(session => session.LocalStart.Date)
                                  .OrderBy(group => group.Key))
                     {
+                        var dateSessions = dateGroup.ToArray();
+                        var dateInfo = new TrackDateGroup(dateGroup.Key, dateSessions);
                         var dateNode = new TreeViewItem
                         {
-                            Header = dateGroup.Key.ToString("ddd, MMM d, yyyy"),
+                            Header = CreateDateHeader(dateInfo),
+                            Tag = dateInfo,
                             IsExpanded = false,
                             FontWeight = FontWeights.Normal,
                             Foreground = new SolidColorBrush(Color.FromRgb(151, 164, 177))
                         };
+                        ContextMenuService.SetIsEnabled(dateNode, false);
 
-                        foreach (var session in dateGroup)
+                        foreach (var session in dateSessions)
                         {
                             var sessionNode = new TreeViewItem
                             {
@@ -892,11 +916,19 @@ public partial class MainWindow : Window
                 await ShowTrackOverviewAsync(_trackBySession[car.Sessions[0].FilePath], car.Sessions, car.Name);
                 break;
             case TrackDriverGroup driver:
-                _selectedSession = null;
-                _primaryLap = null;
-                SessionDetailsPanel.Visibility = Visibility.Collapsed;
-                await ShowTrackOverviewAsync(
-                    _trackBySession[driver.Sessions[0].FilePath], driver.Sessions, driver.Name);
+                if (driver.OptimalLap is not null)
+                {
+                    await SelectLapAsync(driver.OptimalLap);
+                }
+                else
+                {
+                    _selectedSession = null;
+                    _primaryLap = null;
+                    SessionDetailsPanel.Visibility = Visibility.Collapsed;
+                    await ShowTrackOverviewAsync(
+                        _trackBySession[driver.Sessions[0].FilePath], driver.Sessions, driver.Name);
+                }
+
                 break;
             case SessionInfo session:
                 await SelectSessionAsync(session, selectedNode);
@@ -998,6 +1030,7 @@ public partial class MainWindow : Window
             if (fastestLap is not null)
             {
                 _fastestLapTimesBySession[session.FilePath] = fastestLap.DurationMs;
+                UpdateDateNodeHeaders(session);
             }
 
             foreach (var lap in laps.OrderBy(item => item.Index))
@@ -1044,13 +1077,70 @@ public partial class MainWindow : Window
             : header;
     }
 
+    private object CreateDateHeader(TrackDateGroup dateGroup)
+    {
+        var header = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        header.Children.Add(new TextBlock
+        {
+            Text = dateGroup.Date.ToString("ddd, MMM d, yyyy"),
+            VerticalAlignment = VerticalAlignment.Center
+        });
+
+        var fastestDuration = dateGroup.Sessions
+            .Where(session => _fastestLapTimesBySession.ContainsKey(session.FilePath))
+            .Select(session => _fastestLapTimesBySession[session.FilePath])
+            .DefaultIfEmpty(double.PositiveInfinity)
+            .Min();
+        if (double.IsFinite(fastestDuration))
+        {
+            header.Children.Add(new TextBlock
+            {
+                Text = $"  ·  Fastest {FormatLapTime(fastestDuration / 1000d)}",
+                Foreground = Brushes.LimeGreen,
+                Margin = new Thickness(6, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center
+            });
+        }
+
+        return header;
+    }
+
+    private void UpdateDateNodeHeaders(SessionInfo session)
+    {
+        foreach (var trackNode in SessionTree.Items.OfType<TreeViewItem>())
+        foreach (var carNode in trackNode.Items.OfType<TreeViewItem>())
+        foreach (var driverNode in carNode.Items.OfType<TreeViewItem>()
+                     .Where(node => node.Tag is TrackDriverGroup))
+        foreach (var dateNode in driverNode.Items.OfType<TreeViewItem>()
+                     .Where(node => node.Tag is TrackDateGroup dateGroup &&
+                                    dateGroup.Sessions.Any(candidate =>
+                                        candidate.FilePath.Equals(
+                                            session.FilePath, StringComparison.OrdinalIgnoreCase))))
+        {
+            if (dateNode.Tag is TrackDateGroup dateGroup)
+            {
+                dateNode.Header = CreateDateHeader(dateGroup);
+            }
+        }
+    }
+
     private bool IsWetSession(SessionInfo session) =>
         GetSessionEdits(session).TrackCondition.Contains("WET", StringComparison.OrdinalIgnoreCase);
 
     private ContextMenu CreateVehicleContextMenu(TrackCarGroup car)
     {
         var menu = CreateThemedContextMenu();
-        var assignMenu = new MenuItem { Header = "Assign vehicle name" };
+        var itemStyle = (Style)FindResource("DarkMenuItemStyle");
+        var assignMenu = new MenuItem
+        {
+            Header = "Assign vehicle name",
+            Style = itemStyle,
+            ItemContainerStyle = itemStyle
+        };
         var aliases = car.Sessions.Select(session => session.VehicleAlias)
             .Where(alias => !string.IsNullOrWhiteSpace(alias))
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -1064,6 +1154,7 @@ public partial class MainWindow : Window
             var item = new MenuItem
             {
                 Header = vehicleName,
+                Style = itemStyle,
                 Tag = new VehicleAssignment(aliases, vehicleName, car.Sessions),
                 IsEnabled = aliases.Length > 0
             };
@@ -1076,6 +1167,7 @@ public partial class MainWindow : Window
             assignMenu.Items.Add(new MenuItem
             {
                 Header = "No catalog vehicles available",
+                Style = itemStyle,
                 IsEnabled = false
             });
         }
@@ -1184,6 +1276,7 @@ public partial class MainWindow : Window
             if (result.DurationMs is double durationMs)
             {
                 _fastestLapTimesBySession[result.Session.FilePath] = durationMs;
+                UpdateDateNodeHeaders(result.Session);
             }
 
             var node = FindSessionNode(result.Session);
@@ -1294,9 +1387,11 @@ public partial class MainWindow : Window
     private ContextMenu CreateLapContextMenu(LapInfo lap)
     {
         var menu = CreateThemedContextMenu();
+        var itemStyle = (Style)FindResource("DarkMenuItemStyle");
         var setReference = new MenuItem
         {
             Header = "Use as reference lap",
+            Style = itemStyle,
             Tag = lap
         };
         setReference.Click += SetReferenceLap_Click;
@@ -1305,6 +1400,7 @@ public partial class MainWindow : Window
         var clearReference = new MenuItem
         {
             Header = "Clear reference lap",
+            Style = itemStyle,
             IsEnabled = _referenceLap is not null
         };
         clearReference.Click += ClearReferenceLap_Click;
@@ -1668,42 +1764,43 @@ public partial class MainWindow : Window
         var vehicleGroups = visibleSessions.GroupBy(GetVehicleName, StringComparer.CurrentCultureIgnoreCase)
             .OrderBy(group => group.Key, StringComparer.CurrentCultureIgnoreCase)
             .ToArray();
-        var rows = vehicleGroups.Select(group =>
-        {
-            var sessions = group.ToArray();
-            var laps = sessions.Sum(session => lapCounts.TryGetValue(session.FilePath, out var count) ? count : 0);
-            var conditions = sessions.Select(session => GetSessionEdits(session).TrackCondition)
-                .Where(condition => !string.IsNullOrWhiteSpace(condition))
-                .Distinct(StringComparer.CurrentCultureIgnoreCase)
-                .OrderBy(condition => condition, StringComparer.CurrentCultureIgnoreCase);
-            var drivers = sessions.Select(GetDriverName)
-                .Where(driver => !string.IsNullOrWhiteSpace(driver) && driver != "Unknown driver")
-                .Distinct(StringComparer.CurrentCultureIgnoreCase)
-                .OrderBy(driver => driver, StringComparer.CurrentCultureIgnoreCase);
-            var fastestLapSession = sessions
-                .Where(session => _fastestLapTimesBySession.ContainsKey(session.FilePath))
-                .MinBy(session => _fastestLapTimesBySession[session.FilePath]);
-            var optimalLap = sessions
-                .Select(TelemetryLoader.CreateOptimalLap)
-                .OfType<LapInfo>()
-                .Where(lap => double.IsFinite(lap.DurationMs) && lap.DurationMs > 0)
-                .MinBy(lap => lap.DurationMs);
-            return new TrackCarStats(
-                group.Key,
-                sessions.Length,
-                laps.ToString("N0"),
-                string.Join(" · ", conditions),
-                string.Join(" · ", drivers),
-                fastestLapSession is null
-                    ? null
-                    : new LapNavigationTarget(
-                        fastestLapSession,
-                        _fastestLapTimesBySession[fastestLapSession.FilePath],
-                        false),
-                optimalLap is null
-                    ? null
-                    : new LapNavigationTarget(optimalLap.Session, optimalLap.DurationMs, true));
-        }).ToArray();
+        var rows = vehicleGroups.SelectMany(vehicleGroup =>
+                vehicleGroup.GroupBy(GetDriverName, StringComparer.CurrentCultureIgnoreCase)
+                    .OrderBy(driverGroup => driverGroup.Key, StringComparer.CurrentCultureIgnoreCase)
+                    .Select(driverGroup =>
+                    {
+                        var sessions = driverGroup.ToArray();
+                        var laps = sessions.Sum(session =>
+                            lapCounts.TryGetValue(session.FilePath, out var count) ? count : 0);
+                        var conditions = sessions.Select(session => GetSessionEdits(session).TrackCondition)
+                            .Where(condition => !string.IsNullOrWhiteSpace(condition))
+                            .Distinct(StringComparer.CurrentCultureIgnoreCase)
+                            .OrderBy(condition => condition, StringComparer.CurrentCultureIgnoreCase);
+                        var fastestLapSession = sessions
+                            .Where(session => _fastestLapTimesBySession.ContainsKey(session.FilePath))
+                            .MinBy(session => _fastestLapTimesBySession[session.FilePath]);
+                        var optimalLap = sessions
+                            .Select(TelemetryLoader.CreateOptimalLap)
+                            .OfType<LapInfo>()
+                            .Where(lap => double.IsFinite(lap.DurationMs) && lap.DurationMs > 0)
+                            .MinBy(lap => lap.DurationMs);
+                        return new TrackCarStats(
+                            vehicleGroup.Key,
+                            driverGroup.Key,
+                            sessions.Length,
+                            laps.ToString("N0"),
+                            string.Join(" · ", conditions),
+                            fastestLapSession is null
+                                ? null
+                                : new LapNavigationTarget(
+                                    fastestLapSession,
+                                    _fastestLapTimesBySession[fastestLapSession.FilePath],
+                                    false),
+                            optimalLap is null
+                                ? null
+                                : new LapNavigationTarget(optimalLap.Session, optimalLap.DurationMs, true));
+                    }))
+            .ToArray();
 
         TrackCarStatsList.ItemsSource = rows;
         OverviewVehicleCount.Text = vehicleGroups.Length.ToString("N0");
@@ -1729,9 +1826,41 @@ public partial class MainWindow : Window
             return;
         }
 
+        var trackCondition = string.IsNullOrWhiteSpace(TrackConditionCombo.Text)
+            ? "UNKNOWN"
+            : TrackConditionCombo.Text.Trim().ToUpperInvariant();
+        var conditionChanged = !trackCondition.Equals(
+            GetSessionEdits(_selectedSession).TrackCondition, StringComparison.OrdinalIgnoreCase);
+        var metadataNeedsUpdate = !trackCondition.Equals(
+            _selectedSession.TrackCondition, StringComparison.OrdinalIgnoreCase);
+        if (metadataNeedsUpdate && string.IsNullOrWhiteSpace(_selectedSession.SessionMetadataPath) &&
+            conditionChanged)
+        {
+            MessageBox.Show(this,
+                "This session has no metadata file to update, so its track condition cannot be changed.",
+                "Session metadata unavailable", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
+        if (metadataNeedsUpdate && !string.IsNullOrWhiteSpace(_selectedSession.SessionMetadataPath))
+        {
+            try
+            {
+                TelemetryLoader.WriteTrackCondition(_selectedSession.SessionMetadataPath, trackCondition);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                               JsonException or InvalidDataException or ArgumentException)
+            {
+                MessageBox.Show(this,
+                    $"The track condition could not be saved to {_selectedSession.SessionMetadataPath}.{Environment.NewLine}{exception.Message}",
+                    "Could not save track condition", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+        }
+
         _sessionEdits[_selectedSession.SessionGuid] = new SessionEdits(
             vehicleName,
-            string.IsNullOrWhiteSpace(TrackConditionCombo.Text) ? "UNKNOWN" : TrackConditionCombo.Text.Trim().ToUpperInvariant(),
+            trackCondition,
             string.IsNullOrWhiteSpace(RaceTypeBox.Text) ? "TRACK" : RaceTypeBox.Text.Trim(),
             DriverNameBox.Text.Trim());
         if (!SaveSessionEdits())

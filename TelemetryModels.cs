@@ -8,6 +8,7 @@ internal sealed record SessionInfo(
     string FileName,
     string SessionGuid,
     string GarminGuid,
+    string? SessionMetadataPath,
     double Latitude,
     double Longitude,
     DateTime LocalStart,
@@ -129,14 +130,19 @@ internal sealed record TrackPoint(double DistanceM, double Latitude, double Long
 
 internal sealed record TrackCarGroup(string Name, IReadOnlyList<SessionInfo> Sessions);
 
-internal sealed record TrackDriverGroup(string Name, IReadOnlyList<SessionInfo> Sessions);
+internal sealed record TrackDriverGroup(
+    string Name,
+    IReadOnlyList<SessionInfo> Sessions,
+    LapInfo? OptimalLap = null);
+
+internal sealed record TrackDateGroup(DateTime Date, IReadOnlyList<SessionInfo> Sessions);
 
 internal sealed record TrackCarStats(
     string VehicleName,
+    string DriverName,
     int Sessions,
     string Laps,
     string Conditions,
-    string Drivers,
     LapNavigationTarget? FastestLap,
     LapNavigationTarget? OptimalLap)
 {
