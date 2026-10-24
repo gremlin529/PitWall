@@ -1,0 +1,1927 @@
+using System.Globalization;
+using System.IO;
+using System.Text.Json;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media;
+using Microsoft.Win32;
+
+namespace TrackTelemetryViewer;
+
+public partial class MainWindow : Window
+{
+    private const double TrackMergeDistanceM = 5 * 1609.344;
+    private const string DefaultUnits = "Metric";
+    private static readonly Brush PrimaryColor = Brushes.DeepSkyBlue;
+    private static readonly Brush ReferenceColor = Brushes.Orange;
+    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+
+    private readonly string _sessionEditsPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "TrackTelemetryViewer",
+        "session-overrides.json");
+    private readonly string _localViewerSettingsPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "TrackTelemetryViewer",
+        "viewer-settings.json");
+    private readonly string _lastDataFolderPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "TrackTelemetryViewer",
+        "last-data-folder.txt");
+
+    private readonly Dictionary<string, SessionEdits> _sessionEdits = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _vehicleMappings = new(StringComparer.OrdinalIgnoreCase);
+    private ViewerSettings _viewerSettings = new();
+    private IReadOnlyList<string> _customVehicleNames = [];
+    private VehicleCatalog _vehicleCatalog = new([], []);
+    private IReadOnlyDictionary<string, string> _driverNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    private readonly List<SessionInfo> _sessions = [];
+    private readonly List<TrackLocation> _locations = [];
+    private readonly Dictionary<string, TrackLocation> _trackBySession = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, double> _fastestLapTimesBySession =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, IReadOnlyList<LapInfo>> _lapsBySession = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Task<IReadOnlyList<LapInfo>>> _lapLoadTasks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, IReadOnlyList<TrackPoint>> _meanlineCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Task<IReadOnlyDictionary<string, int>>> _trackStatsTasks =
+        new(StringComparer.OrdinalIgnoreCase);
+    private IReadOnlyList<SessionInfo> _overviewSessions = [];
+    private IReadOnlyDictionary<string, int> _overviewLapCounts =
+        new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+    private SessionInfo? _selectedSession;
+    private TrackLocation? _selectedLocation;
+    private string? _dataFolder;
+    private LapInfo? _primaryLap;
+    private LapInfo? _referenceLap;
+    private SessionTrace? _primaryTrace;
+    private SessionTrace? _referenceTrace;
+    private int _loadGeneration;
+    private int _overviewGeneration;
+    private int _treeGeneration;
+    private double _cursorDistanceM;
+
+    public MainWindow()
+    {
+        InitializeComponent();
+        LoadSessionEdits();
+        SpeedChart.Title = "SPEED";
+        SpeedChart.Unit = "km/h";
+        GForceChart.Title = "G-FORCE";
+        GForceChart.Unit = "lateral g (solid) · longitudinal g (dashed)";
+        DeltaChart.Title = "TIME DELTA  ·  A − B";
+        DeltaChart.Unit = "seconds";
+    }
+
+    private async void Window_Loaded(object sender, RoutedEventArgs e)
+    {
+        var defaultFolder = FindDefaultDataFolder();
+        if (defaultFolder is null)
+        {
+            StatusText.Text = "Choose the folder containing your session JSON files.";
+            return;
+        }
+
+        await LoadFolderAsync(defaultFolder);
+    }
+
+    private async void OpenFolder_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFolderDialog
+        {
+            Title = "Choose the folder containing session JSON files",
+            Multiselect = false
+        };
+
+        if (dialog.ShowDialog(this) == true)
+        {
+            await LoadFolderAsync(dialog.FolderName);
+        }
+    }
+
+    private async void Settings_Click(object sender, RoutedEventArgs e)
+    {
+        var aliases = _sessions.Select(session => session.VehicleAlias)
+            .Where(alias => !string.IsNullOrWhiteSpace(alias))
+            .Concat(_viewerSettings.VehicleMappings.Keys)
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+        var vehicleNames = _vehicleCatalog.Names
+            .Concat(_customVehicleNames)
+            .Concat(_vehicleMappings.Values)
+            .Distinct(StringComparer.CurrentCultureIgnoreCase)
+            .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase)
+            .ToArray();
+        var trackAliasItems = _sessions
+            .Select(session =>
+            {
+                var configurationName = GetEffectiveLayoutName(session);
+                var sourceTrackName = string.IsNullOrWhiteSpace(session.MeanlineTrackName)
+                    ? "Unknown track"
+                    : session.MeanlineTrackName.Trim();
+                var trackName = _trackBySession.TryGetValue(session.FilePath, out var location)
+                    ? location.TrackName
+                    : string.IsNullOrWhiteSpace(session.MeanlineTrackName)
+                        ? "Unknown track"
+                        : session.MeanlineTrackName.Trim();
+                var key = CreateTrackAliasKey(sourceTrackName, configurationName);
+                var isUnspecifiedWithAlternatives = string.IsNullOrWhiteSpace(configurationName) &&
+                    _locations.Any(candidate =>
+                        !string.IsNullOrWhiteSpace(candidate.ConfigurationName) &&
+                        !candidate.ConfigurationName.Equals("Layout unspecified", StringComparison.OrdinalIgnoreCase) &&
+                        candidate.TrackName.Equals(trackName, StringComparison.CurrentCultureIgnoreCase) &&
+                        DistanceMeters(candidate.Latitude, candidate.Longitude, session.Latitude, session.Longitude) <=
+                        TrackMergeDistanceM);
+                var defaultName = string.IsNullOrWhiteSpace(configurationName)
+                    ? isUnspecifiedWithAlternatives
+                        ? $"{trackName} · Layout unspecified"
+                        : trackName
+                    : $"{trackName} · {configurationName}";
+                var layoutLabel = string.IsNullOrWhiteSpace(configurationName)
+                    ? $"{trackName} · Layout unspecified"
+                    : defaultName;
+                var displayName = _viewerSettings.TrackMappings.TryGetValue(key, out var mappedName)
+                    ? mappedName
+                    : defaultName;
+                return new TrackAliasSetting(key, layoutLabel, defaultName, displayName);
+            })
+            .GroupBy(alias => alias.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToArray();
+        var dialog = new SettingsWindow(
+            _viewerSettings,
+            aliases,
+            trackAliasItems,
+            vehicleNames,
+            _vehicleCatalog.Names)
+        {
+            Owner = this
+        };
+        if (dialog.ShowDialog() != true)
+        {
+            return;
+        }
+
+        var settingsPath = GetViewerSettingsPath();
+        try
+        {
+            var parentDirectory = Path.GetDirectoryName(settingsPath);
+            if (!string.IsNullOrWhiteSpace(parentDirectory))
+            {
+                Directory.CreateDirectory(parentDirectory);
+            }
+
+            File.WriteAllText(settingsPath, JsonSerializer.Serialize(dialog.Settings, JsonOptions));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+            MessageBox.Show(this,
+                $"Settings could not be saved to {settingsPath}.{Environment.NewLine}{exception.Message}",
+                "Could not save settings", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
+        _viewerSettings = dialog.Settings;
+        _vehicleMappings.Clear();
+        foreach (var (alias, vehicleName) in _viewerSettings.VehicleMappings)
+        {
+            _vehicleMappings[alias] = vehicleName;
+        }
+
+        _customVehicleNames = _viewerSettings.CustomVehicleNames;
+        UpdateVehicleChoices();
+        var selectedSession = _selectedSession;
+        var selectedLocationSessions = _selectedLocation?.Sessions;
+        BuildTrackLocations();
+        ApplyDistanceUnits();
+
+        BuildSessionTree();
+        if (selectedSession is not null)
+        {
+            var sessionNode = FindSessionNode(selectedSession);
+            if (sessionNode is not null)
+            {
+                ExpandAncestors(sessionNode);
+                sessionNode.IsSelected = true;
+            }
+        }
+        else if (selectedLocationSessions is { Count: > 0 } &&
+                 _trackBySession.TryGetValue(selectedLocationSessions[0].FilePath, out var refreshedLocation))
+        {
+            _selectedLocation = refreshedLocation;
+            var trackNode = SessionTree.Items.OfType<TreeViewItem>()
+                .FirstOrDefault(node => node.Tag is TrackLocation location &&
+                                        location.Key == refreshedLocation.Key);
+            if (trackNode is not null)
+            {
+                trackNode.IsSelected = true;
+            }
+        }
+
+        if (selectedSession is null && _selectedLocation is not null)
+        {
+            await ShowTrackOverviewAsync(_selectedLocation, null);
+        }
+
+        StatusText.Text = $"Settings saved to {settingsPath}.";
+    }
+
+    private string GetViewerSettingsPath() =>
+        _dataFolder is null
+            ? _localViewerSettingsPath
+            : Path.Combine(_dataFolder, "viewer-settings.json");
+
+    private void UpdateVehicleChoices()
+    {
+        var names = _vehicleCatalog.Names
+            .Concat(_customVehicleNames)
+            .Concat(_vehicleMappings.Values)
+            .Where(name => !IsVehicleHidden(name))
+            .Distinct(StringComparer.CurrentCultureIgnoreCase)
+            .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase)
+            .ToArray();
+        VehicleNameCombo.ItemsSource = names;
+    }
+
+    private bool UseImperialDistance =>
+        _viewerSettings.DistanceUnits.Equals("Imperial", StringComparison.OrdinalIgnoreCase);
+
+    private string FormatTrackLength(double distanceM) => UseImperialDistance
+        ? $"{distanceM / 1609.344:0.00} mi"
+        : $"{distanceM / 1000:0.00} km";
+
+    private void ApplyDistanceUnits()
+    {
+        var useImperial = UseImperialDistance;
+        SpeedChart.Unit = useImperial ? "mph" : "km/h";
+        SpeedChart.UseImperialDistance = useImperial;
+        GForceChart.UseImperialDistance = useImperial;
+        DeltaChart.UseImperialDistance = useImperial;
+        if (_selectedLocation is not null && TrackOverviewPanel.Visibility == Visibility.Visible)
+        {
+            UpdateTrackOverviewDistanceLabels(_selectedLocation);
+        }
+
+        if (_primaryTrace is not null)
+        {
+            UpdateCharts();
+            UpdateStatistics();
+            if (DataViewPanel.Visibility == Visibility.Visible)
+            {
+                StatusText.Text =
+                    $"Showing {_primaryTrace.Points.Count:N0} samples from {_primaryTrace.Lap.Label}. " +
+                    $"Speed is converted to {SpeedChart.Unit}; acceleration axes are shown in g.";
+            }
+        }
+    }
+
+    private void UpdateTrackOverviewDistanceLabels(TrackLocation location)
+    {
+        OverviewTrackSubtitle.Text =
+            $"{location.DisplayName} · {FormatTrackLength(location.LengthM)} · " +
+            $"{location.Sessions.Count(session => !IsVehicleHidden(GetVehicleName(session)))} " +
+            $"sessions at {location.Latitude:F5}, {location.Longitude:F5}";
+        OverviewTrackLength.Text = location.LengthM > 0
+            ? FormatTrackLength(location.LengthM)
+            : "—";
+    }
+
+    private void LoadViewerSettings(string folder)
+    {
+        _vehicleMappings.Clear();
+        _viewerSettings = new ViewerSettings();
+        var settingsPaths = new[]
+        {
+            _localViewerSettingsPath,
+            Path.Combine(folder, "viewer-settings.json")
+        }.Distinct(StringComparer.OrdinalIgnoreCase);
+        foreach (var settingsPath in settingsPaths)
+        {
+            if (!File.Exists(settingsPath))
+            {
+                continue;
+            }
+
+            try
+            {
+                var loadedSettings = JsonSerializer.Deserialize<ViewerSettings>(File.ReadAllText(settingsPath))
+                                     ?? throw new InvalidDataException("The settings file did not contain a JSON object.");
+                _viewerSettings.DistanceUnits =
+                    loadedSettings.DistanceUnits?.Equals("Imperial", StringComparison.OrdinalIgnoreCase) == true
+                        ? "Imperial"
+                        : DefaultUnits;
+                _viewerSettings.CustomVehicleNames = _viewerSettings.CustomVehicleNames
+                    .Concat(loadedSettings.CustomVehicleNames ?? [])
+                    .Distinct(StringComparer.CurrentCultureIgnoreCase)
+                    .ToList();
+                _viewerSettings.HiddenVehicleNames = _viewerSettings.HiddenVehicleNames
+                    .Concat(loadedSettings.HiddenVehicleNames ?? [])
+                    .Distinct(StringComparer.CurrentCultureIgnoreCase)
+                    .ToList();
+                foreach (var (trackAlias, trackName) in loadedSettings.TrackMappings ?? [])
+                {
+                    if (!string.IsNullOrWhiteSpace(trackAlias) && !string.IsNullOrWhiteSpace(trackName))
+                    {
+                        _viewerSettings.TrackMappings[trackAlias] = trackName;
+                    }
+                }
+
+                foreach (var (sessionGuid, layoutName) in loadedSettings.SessionLayoutAssignments ?? [])
+                {
+                    if (!string.IsNullOrWhiteSpace(sessionGuid) && !string.IsNullOrWhiteSpace(layoutName))
+                    {
+                        _viewerSettings.SessionLayoutAssignments[sessionGuid] = layoutName;
+                    }
+                }
+
+                foreach (var (alias, vehicleName) in loadedSettings.VehicleMappings ?? [])
+                {
+                    if (!string.IsNullOrWhiteSpace(alias) && !string.IsNullOrWhiteSpace(vehicleName))
+                    {
+                        _vehicleMappings[alias] = vehicleName;
+                    }
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                               JsonException or InvalidDataException)
+            {
+                MessageBox.Show(this,
+                    $"Viewer settings could not be loaded from {settingsPath}.{Environment.NewLine}{exception.Message}",
+                    "Could not load settings", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+
+        foreach (var (alias, vehicleName) in _viewerSettings.VehicleMappings)
+        {
+            if (!string.IsNullOrWhiteSpace(alias) && !string.IsNullOrWhiteSpace(vehicleName))
+            {
+                _vehicleMappings[alias] = vehicleName;
+            }
+        }
+
+        var legacyMappingPath = Path.Combine(folder, "vehicle-name-mappings.json");
+        if (File.Exists(legacyMappingPath))
+        {
+            try
+            {
+                var legacyMappings = JsonSerializer.Deserialize<Dictionary<string, string>>(
+                    File.ReadAllText(legacyMappingPath));
+                if (legacyMappings is not null)
+                {
+                    foreach (var (alias, vehicleName) in legacyMappings)
+                    {
+                        _vehicleMappings.TryAdd(alias, vehicleName);
+                    }
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+            {
+                MessageBox.Show(this,
+                    $"Legacy vehicle mappings could not be loaded from {legacyMappingPath}.{Environment.NewLine}{exception.Message}",
+                    "Could not load vehicle mappings", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+
+        _viewerSettings.VehicleMappings = new Dictionary<string, string>(
+            _vehicleMappings, StringComparer.OrdinalIgnoreCase);
+        _customVehicleNames = _viewerSettings.CustomVehicleNames;
+    }
+
+    private void SaveLastDataFolder(string folder)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(_lastDataFolderPath)!);
+            File.WriteAllText(_lastDataFolderPath, folder);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            MessageBox.Show(this,
+                $"The last-used data folder could not be remembered.{Environment.NewLine}{exception.Message}",
+                "Could not save last data folder", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private async Task LoadFolderAsync(string folder)
+    {
+        if (!Directory.Exists(folder))
+        {
+            MessageBox.Show(this, $"The selected folder does not exist:\n{folder}",
+                "Folder not found", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var treeGeneration = ++_treeGeneration;
+        StatusText.Text = "Scanning session files…";
+        var files = TelemetryLoader.EnumerateFilesRecursively(folder, "autosport-performance-*.json")
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (files.Length == 0)
+        {
+            MessageBox.Show(this,
+                "No autosport-performance-*.json session files were found in the selected folder.",
+                "No session files", MessageBoxButton.OK, MessageBoxImage.Information);
+            StatusText.Text = "No session files found.";
+            return;
+        }
+
+        var dataFileIndex = TelemetryLoader.BuildDataFileIndex(folder);
+        List<SessionInfo> loaded = [];
+        List<string> failures = [];
+        await Task.Run(() =>
+        {
+            foreach (var file in files)
+            {
+                try
+                {
+                    loaded.Add(TelemetryLoader.ReadSessionInfo(file, dataFileIndex));
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                                   InvalidDataException or ArgumentOutOfRangeException)
+                {
+                    failures.Add($"{Path.GetFileName(file)}: {exception.Message}");
+                }
+            }
+        });
+
+        _sessions.Clear();
+        _sessions.AddRange(loaded.OrderBy(session => session.LocalStart));
+        _dataFolder = folder;
+        LoadViewerSettings(folder);
+        try
+        {
+            _vehicleCatalog = TelemetryLoader.ReadVehicleCatalog(folder);
+            UpdateVehicleChoices();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                           JsonException or InvalidDataException)
+        {
+            VehicleNameCombo.ItemsSource = Array.Empty<string>();
+            _vehicleCatalog = new VehicleCatalog([], []);
+            MessageBox.Show(this, exception.Message, "Vehicle catalog could not be loaded",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        try
+        {
+            _driverNames = TelemetryLoader.ReadDriverNames(folder);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+            _driverNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            MessageBox.Show(this, exception.Message, "Driver profiles could not be loaded",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        _lapsBySession.Clear();
+        _fastestLapTimesBySession.Clear();
+        _lapLoadTasks.Clear();
+        _meanlineCache.Clear();
+        _trackStatsTasks.Clear();
+        _referenceLap = null;
+        _referenceTrace = null;
+        BuildTrackLocations();
+        ApplyDistanceUnits();
+        DataFolderText.Text = folder;
+        SessionCountText.Text = $"{_sessions.Count} SESSIONS";
+        BuildSessionTree();
+
+        if (failures.Count > 0)
+        {
+            var details = string.Join(Environment.NewLine, failures.Take(8));
+            if (failures.Count > 8)
+            {
+                details += $"{Environment.NewLine}…and {failures.Count - 8} more.";
+            }
+
+            MessageBox.Show(this,
+                $"Loaded {_sessions.Count} of {files.Length} files. Some files could not be read:{Environment.NewLine}{details}",
+                "Session scan completed with errors", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+
+        if (_sessions.Count == 0)
+        {
+            StatusText.Text = "No valid sessions found.";
+            return;
+        }
+
+        SaveLastDataFolder(folder);
+        StatusText.Text = $"Loaded {_sessions.Count} sessions across {_locations.Count} tracks.";
+        SelectFirstSession();
+        _ = LoadFastestLapHeadersAsync(treeGeneration);
+    }
+
+    private void BuildTrackLocations()
+    {
+        _locations.Clear();
+        _trackBySession.Clear();
+
+        var sessions = _sessions.OrderBy(session => session.Latitude)
+            .ThenBy(session => session.Longitude)
+            .ThenBy(session => session.LocalStart)
+            .ToArray();
+        var parents = Enumerable.Range(0, sessions.Length).ToArray();
+
+        int Find(int index)
+        {
+            if (parents[index] != index)
+            {
+                parents[index] = Find(parents[index]);
+            }
+
+            return parents[index];
+        }
+
+        void Union(int left, int right)
+        {
+            var leftRoot = Find(left);
+            var rightRoot = Find(right);
+            if (leftRoot != rightRoot)
+            {
+                parents[rightRoot] = leftRoot;
+            }
+        }
+
+        for (var left = 0; left < sessions.Length; left++)
+        {
+            for (var right = left + 1; right < sessions.Length; right++)
+            {
+                if (DistanceMeters(sessions[left].Latitude, sessions[left].Longitude,
+                        sessions[right].Latitude, sessions[right].Longitude) <= TrackMergeDistanceM)
+                {
+                    Union(left, right);
+                }
+            }
+        }
+
+        foreach (var cluster in Enumerable.Range(0, sessions.Length).GroupBy(Find))
+        {
+            var nearbySessions = cluster.Select(index => sessions[index])
+                .OrderBy(session => session.LocalStart)
+                .ToArray();
+            var clusterLatitude = nearbySessions.Average(session => session.Latitude);
+            var clusterLongitude = nearbySessions.Average(session => session.Longitude);
+            var trackName = nearbySessions.Where(session => !string.IsNullOrWhiteSpace(session.MeanlineTrackName))
+                .GroupBy(session => session.MeanlineTrackName, StringComparer.CurrentCultureIgnoreCase)
+                .OrderByDescending(group => group.Count())
+                .Select(group => group.Key)
+                .FirstOrDefault() ?? $"Track {clusterLatitude:F2}, {clusterLongitude:F2}";
+
+            var distinctLayouts = nearbySessions
+                .Select(GetEffectiveLayoutName)
+                .Distinct(StringComparer.CurrentCultureIgnoreCase)
+                .ToArray();
+            var displayGroups = nearbySessions.GroupBy(session =>
+            {
+                var effectiveConfiguration = GetEffectiveLayoutName(session);
+                var effectiveTrackName = trackName;
+                var configurationLabel = string.IsNullOrWhiteSpace(effectiveConfiguration)
+                    ? distinctLayouts.Length > 1 ? "Layout unspecified" : string.Empty
+                    : effectiveConfiguration;
+                var aliasKey = CreateTrackAliasKey(
+                    string.IsNullOrWhiteSpace(session.MeanlineTrackName)
+                        ? "Unknown track"
+                        : effectiveTrackName,
+                    effectiveConfiguration);
+                return _viewerSettings.TrackMappings.TryGetValue(aliasKey, out var mappedName) &&
+                       !string.IsNullOrWhiteSpace(mappedName)
+                    ? mappedName.Trim()
+                    : string.IsNullOrWhiteSpace(configurationLabel)
+                        ? effectiveTrackName
+                        : $"{effectiveTrackName} · {configurationLabel}";
+            }, StringComparer.CurrentCultureIgnoreCase);
+
+            foreach (var displayGroup in displayGroups)
+            {
+                var members = displayGroup.ToArray();
+                var latitude = members.Average(session => session.Latitude);
+                var longitude = members.Average(session => session.Longitude);
+                var memberConfigurations = members.Select(GetEffectiveLayoutName)
+                    .Distinct(StringComparer.CurrentCultureIgnoreCase)
+                    .ToArray();
+                var configurationName = memberConfigurations.Length == 1
+                    ? string.IsNullOrWhiteSpace(memberConfigurations[0]) && distinctLayouts.Length > 1
+                        ? "Layout unspecified"
+                        : memberConfigurations[0]
+                    : "Combined layouts";
+                var locationTrackName = members.Where(session => !string.IsNullOrWhiteSpace(session.MeanlineTrackName))
+                    .GroupBy(session => session.MeanlineTrackName.Trim(), StringComparer.CurrentCultureIgnoreCase)
+                    .OrderByDescending(group => group.Count())
+                    .Select(group => group.Key)
+                    .FirstOrDefault() ?? trackName;
+                var key = string.Create(CultureInfo.InvariantCulture,
+                    $"{latitude:F4},{longitude:F4}|{displayGroup.Key.ToUpperInvariant()}");
+                var lengthM = members.Where(session => session.MeanlineLengthM > 0)
+                    .Select(session => session.MeanlineLengthM)
+                    .DefaultIfEmpty(0)
+                    .Average();
+                var meanlinePath = members.FirstOrDefault(session => session.MeanlinePath is not null)?.MeanlinePath;
+                var location = new TrackLocation(
+                    key, latitude, longitude, members, locationTrackName, configurationName, lengthM, meanlinePath,
+                    displayGroup.Key);
+                _locations.Add(location);
+
+                foreach (var session in members)
+                {
+                    _trackBySession[session.FilePath] = location;
+                }
+            }
+        }
+    }
+
+    private static string CreateTrackAliasKey(string trackName, string configurationName) =>
+        JsonSerializer.Serialize(new[] { trackName.Trim(), configurationName.Trim() });
+
+    private string GetEffectiveLayoutName(SessionInfo session)
+    {
+        if (!string.IsNullOrWhiteSpace(session.MeanlineConfigurationName))
+        {
+            return session.MeanlineConfigurationName.Trim();
+        }
+
+        return _viewerSettings.SessionLayoutAssignments.TryGetValue(session.SessionGuid, out var layoutName)
+            ? layoutName.Trim()
+            : string.Empty;
+    }
+
+    private ContextMenu? CreateLayoutContextMenu(TrackLocation location)
+    {
+        if (!location.ConfigurationName.Equals("Layout unspecified", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var availableLayouts = _locations
+            .Where(candidate =>
+                !ReferenceEquals(candidate, location) &&
+                candidate.TrackName.Equals(location.TrackName, StringComparison.CurrentCultureIgnoreCase) &&
+                !string.IsNullOrWhiteSpace(candidate.ConfigurationName) &&
+                !candidate.ConfigurationName.Equals("Layout unspecified", StringComparison.OrdinalIgnoreCase) &&
+                DistanceMeters(candidate.Latitude, candidate.Longitude, location.Latitude, location.Longitude) <=
+                TrackMergeDistanceM)
+            .Select(candidate => candidate.ConfigurationName)
+            .Distinct(StringComparer.CurrentCultureIgnoreCase)
+            .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase)
+            .ToArray();
+        if (availableLayouts.Length == 0)
+        {
+            return null;
+        }
+
+        var menu = CreateThemedContextMenu();
+        var itemStyle = (Style)FindResource("DarkMenuItemStyle");
+        var layoutMenu = new MenuItem
+        {
+            Header = "Choose layout",
+            Style = itemStyle,
+            ItemContainerStyle = itemStyle
+        };
+        foreach (var layoutName in availableLayouts)
+        {
+            var item = new MenuItem
+            {
+                Header = layoutName,
+                Style = itemStyle,
+                Tag = new TrackLayoutAssignment(location, layoutName)
+            };
+            item.Click += AssignTrackLayout_Click;
+            layoutMenu.Items.Add(item);
+        }
+
+        menu.Items.Add(layoutMenu);
+        return menu;
+    }
+
+    private void AssignTrackLayout_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Tag: TrackLayoutAssignment assignment })
+        {
+            return;
+        }
+
+        var assignments = new Dictionary<string, string>(
+            _viewerSettings.SessionLayoutAssignments, StringComparer.OrdinalIgnoreCase);
+        foreach (var session in assignment.Location.Sessions)
+        {
+            assignments[session.SessionGuid] = assignment.LayoutName;
+        }
+
+        var updatedSettings = new ViewerSettings
+        {
+            DistanceUnits = _viewerSettings.DistanceUnits,
+            CustomVehicleNames = [.. _viewerSettings.CustomVehicleNames],
+            HiddenVehicleNames = [.. _viewerSettings.HiddenVehicleNames],
+            VehicleMappings = new Dictionary<string, string>(
+                _viewerSettings.VehicleMappings, StringComparer.OrdinalIgnoreCase),
+            TrackMappings = new Dictionary<string, string>(
+                _viewerSettings.TrackMappings, StringComparer.OrdinalIgnoreCase),
+            SessionLayoutAssignments = assignments
+        };
+        var settingsPath = GetViewerSettingsPath();
+        try
+        {
+            var parentDirectory = Path.GetDirectoryName(settingsPath);
+            if (!string.IsNullOrWhiteSpace(parentDirectory))
+            {
+                Directory.CreateDirectory(parentDirectory);
+            }
+
+            File.WriteAllText(settingsPath, JsonSerializer.Serialize(updatedSettings, JsonOptions));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+            MessageBox.Show(this,
+                $"The layout choice could not be saved to {settingsPath}.{Environment.NewLine}{exception.Message}",
+                "Could not save layout", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
+        _viewerSettings = updatedSettings;
+        BuildTrackLocations();
+        BuildSessionTree();
+
+        if (assignment.Location.Sessions.Count > 0 &&
+            _trackBySession.TryGetValue(assignment.Location.Sessions[0].FilePath, out var assignedLocation))
+        {
+            var trackNode = SessionTree.Items.OfType<TreeViewItem>()
+                .FirstOrDefault(node => node.Tag is TrackLocation location &&
+                                        location.Key == assignedLocation.Key);
+            if (trackNode is not null)
+            {
+                trackNode.IsSelected = true;
+            }
+        }
+
+        StatusText.Text = $"Layout set to {assignment.LayoutName} and saved to {settingsPath}.";
+    }
+
+    private void BuildSessionTree()
+    {
+        SessionTree.Items.Clear();
+        foreach (var location in _locations.OrderBy(item => item.DisplayName, StringComparer.CurrentCultureIgnoreCase))
+        {
+            var visibleSessions = location.Sessions.Where(session => !IsVehicleHidden(GetVehicleName(session)))
+                .ToArray();
+            if (visibleSessions.Length == 0)
+            {
+                continue;
+            }
+
+            var header = new TextBlock { Text = $"{location.DisplayName}  ({visibleSessions.Length})" };
+            var locationNode = new TreeViewItem
+            {
+                Header = header,
+                Tag = location,
+                IsExpanded = false,
+                FontWeight = FontWeights.SemiBold
+            };
+            var layoutContextMenu = CreateLayoutContextMenu(location);
+            if (layoutContextMenu is not null)
+            {
+                locationNode.ContextMenu = layoutContextMenu;
+            }
+
+            foreach (var carGroup in visibleSessions.GroupBy(GetVehicleName, StringComparer.CurrentCultureIgnoreCase)
+                         .OrderBy(group => group.Key, StringComparer.CurrentCultureIgnoreCase))
+            {
+                var carSessions = carGroup.OrderBy(session => session.LocalStart).ToArray();
+                var carNode = new TreeViewItem
+                {
+                    Header = $"{carGroup.Key}  ({carSessions.Length})",
+                    Tag = new TrackCarGroup(carGroup.Key, carSessions),
+                    IsExpanded = false,
+                    FontWeight = FontWeights.Normal,
+                    Foreground = new SolidColorBrush(Color.FromRgb(151, 164, 177))
+                };
+
+                var optimalLap = carSessions
+                    .Select(TelemetryLoader.CreateOptimalLap)
+                    .OfType<LapInfo>()
+                    .Where(lap => double.IsFinite(lap.DurationMs) && lap.DurationMs > 0)
+                    .MinBy(lap => lap.DurationMs);
+                if (optimalLap is not null)
+                {
+                    carNode.Items.Add(CreateLapTreeNode(optimalLap, Brushes.MediumPurple));
+                }
+
+                carNode.ContextMenu = CreateVehicleContextMenu((TrackCarGroup)carNode.Tag);
+
+                foreach (var driverGroup in carSessions
+                             .GroupBy(GetDriverName, StringComparer.CurrentCultureIgnoreCase)
+                             .OrderBy(group => group.Key, StringComparer.CurrentCultureIgnoreCase))
+                {
+                    var driverSessions = driverGroup.OrderBy(session => session.LocalStart).ToArray();
+                    var driverNode = new TreeViewItem
+                    {
+                        Header = $"{driverGroup.Key}  ({driverSessions.Length})",
+                        Tag = new TrackDriverGroup(driverGroup.Key, driverSessions),
+                        IsExpanded = false,
+                        FontWeight = FontWeights.Normal,
+                        Foreground = new SolidColorBrush(Color.FromRgb(151, 164, 177))
+                    };
+
+                    foreach (var dateGroup in driverSessions.GroupBy(session => session.LocalStart.Date)
+                                 .OrderBy(group => group.Key))
+                    {
+                        var dateNode = new TreeViewItem
+                        {
+                            Header = dateGroup.Key.ToString("ddd, MMM d, yyyy"),
+                            IsExpanded = false,
+                            FontWeight = FontWeights.Normal,
+                            Foreground = new SolidColorBrush(Color.FromRgb(151, 164, 177))
+                        };
+
+                        foreach (var session in dateGroup)
+                        {
+                            var sessionNode = new TreeViewItem
+                            {
+                                Header = FormatSessionHeader(
+                                    session,
+                                    _fastestLapTimesBySession.TryGetValue(session.FilePath, out var fastestDuration)
+                                        ? fastestDuration
+                                        : null),
+                                Tag = session,
+                                FontWeight = FontWeights.Normal
+                            };
+                            if (IsWetSession(session))
+                            {
+                                sessionNode.Foreground = Brushes.DeepSkyBlue;
+                            }
+
+                            sessionNode.Expanded += SessionNode_Expanded;
+                            dateNode.Items.Add(sessionNode);
+                        }
+
+                        driverNode.Items.Add(dateNode);
+                    }
+
+                    carNode.Items.Add(driverNode);
+                }
+
+                locationNode.Items.Add(carNode);
+            }
+
+            SessionTree.Items.Add(locationNode);
+        }
+    }
+
+    private void SelectFirstSession()
+    {
+        if (SessionTree.Items.Count > 0 && SessionTree.Items[0] is TreeViewItem firstTrack)
+        {
+            firstTrack.IsSelected = true;
+        }
+    }
+
+    private async void SessionTree_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e)
+    {
+        if (e.NewValue is not TreeViewItem selectedNode)
+        {
+            return;
+        }
+
+        switch (selectedNode.Tag)
+        {
+            case TrackLocation location:
+                _selectedLocation = location;
+                _selectedSession = null;
+                _primaryLap = null;
+                SessionDetailsPanel.Visibility = Visibility.Collapsed;
+                await ShowTrackOverviewAsync(location, null);
+                break;
+            case TrackCarGroup car:
+                _selectedSession = null;
+                _primaryLap = null;
+                SessionDetailsPanel.Visibility = Visibility.Collapsed;
+                await ShowTrackOverviewAsync(_trackBySession[car.Sessions[0].FilePath], car.Sessions, car.Name);
+                break;
+            case TrackDriverGroup driver:
+                _selectedSession = null;
+                _primaryLap = null;
+                SessionDetailsPanel.Visibility = Visibility.Collapsed;
+                await ShowTrackOverviewAsync(
+                    _trackBySession[driver.Sessions[0].FilePath], driver.Sessions, driver.Name);
+                break;
+            case SessionInfo session:
+                await SelectSessionAsync(session, selectedNode);
+                break;
+            case LapInfo lap:
+                await SelectLapAsync(lap);
+                break;
+        }
+    }
+
+    private async Task SelectSessionAsync(SessionInfo session, TreeViewItem sessionNode)
+    {
+        _selectedSession = session;
+        _selectedLocation = _trackBySession[session.FilePath];
+        DataViewPanel.Visibility = Visibility.Visible;
+        TrackOverviewPanel.Visibility = Visibility.Collapsed;
+        SessionDetailsPanel.Visibility = Visibility.Visible;
+        TrackTitleText.Text = _selectedLocation.DisplayName;
+        SessionSubtitleText.Text =
+            $"{session.LocalStart:dddd, MMMM d, yyyy  ·  h:mm:ss tt}  ·  {GetDriverName(session)}  ·  " +
+            $"{GetVehicleName(session)}  ·  " +
+            $"{GetSessionEdits(session).TrackCondition} · {GetSessionEdits(session).RaceType}";
+        PopulateSessionEditor(session);
+
+        if (_referenceLap is not null &&
+            (!_trackBySession.TryGetValue(_referenceLap.Session.FilePath, out var referenceTrack) ||
+             !ReferenceEquals(referenceTrack, _selectedLocation)))
+        {
+            _referenceLap = null;
+            _referenceTrace = null;
+            UpdateReferenceHeader();
+        }
+
+        var laps = await PopulateLapNodesAsync(session, sessionNode);
+        if (laps is null)
+        {
+            return;
+        }
+
+        sessionNode.IsExpanded = true;
+        var bestLap = laps.MinBy(item => item.DurationMs);
+        var bestNode = sessionNode.Items.OfType<TreeViewItem>()
+            .FirstOrDefault(node => node.Tag is LapInfo item && item == bestLap);
+        if (bestNode is not null)
+        {
+            bestNode.IsSelected = true;
+        }
+    }
+
+    private async void SessionNode_Expanded(object sender, RoutedEventArgs e)
+    {
+        if (sender is TreeViewItem { Tag: SessionInfo session } sessionNode)
+        {
+            await PopulateLapNodesAsync(session, sessionNode);
+        }
+    }
+
+    private async Task<IReadOnlyList<LapInfo>?> PopulateLapNodesAsync(
+        SessionInfo session,
+        TreeViewItem sessionNode)
+    {
+        if (!_lapsBySession.TryGetValue(session.FilePath, out var laps))
+        {
+            StatusText.Text = $"Reading lap list from {session.FileName}…";
+            try
+            {
+                if (!_lapLoadTasks.TryGetValue(session.FilePath, out var loadTask))
+                {
+                    loadTask = Task.Run(() => TelemetryLoader.ReadLaps(session));
+                    _lapLoadTasks[session.FilePath] = loadTask;
+                }
+
+                laps = await loadTask;
+                _lapsBySession[session.FilePath] = laps;
+                _lapLoadTasks.Remove(session.FilePath);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                               JsonException or InvalidDataException or ArgumentException)
+            {
+                _lapLoadTasks.Remove(session.FilePath);
+                StatusText.Text = "Could not read session laps.";
+                MessageBox.Show(this, exception.Message, "Laps could not be loaded",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+                return null;
+            }
+        }
+
+        if (!sessionNode.Items.OfType<TreeViewItem>().Any(node => node.Tag is LapInfo { IsOptimal: false }))
+        {
+            var optimalLap = TelemetryLoader.CreateOptimalLap(session);
+            if (optimalLap is not null)
+            {
+                sessionNode.Items.Add(CreateLapTreeNode(optimalLap, Brushes.MediumPurple));
+            }
+
+            var fastestLap = laps
+                .Where(lap => !lap.IsAverage && double.IsFinite(lap.DurationMs) && lap.DurationMs > 0)
+                .MinBy(lap => lap.DurationMs);
+            if (fastestLap is not null)
+            {
+                _fastestLapTimesBySession[session.FilePath] = fastestLap.DurationMs;
+            }
+
+            foreach (var lap in laps.OrderBy(item => item.Index))
+            {
+                sessionNode.Items.Add(CreateLapTreeNode(
+                    lap,
+                    lap == fastestLap ? Brushes.LimeGreen : null));
+            }
+
+            sessionNode.Header = FormatSessionHeader(session, fastestLap?.DurationMs);
+        }
+
+        return laps;
+    }
+
+    private TreeViewItem CreateLapTreeNode(LapInfo lap, Brush? foreground = null)
+    {
+        var node = new TreeViewItem
+        {
+            Header = lap.TreeLabel,
+            Tag = lap,
+            FontWeight = FontWeights.Normal,
+            ContextMenu = CreateLapContextMenu(lap)
+        };
+        if (foreground is not null)
+        {
+            node.Foreground = foreground;
+        }
+
+        return node;
+    }
+
+    private string FormatSessionHeader(SessionInfo session, double? fastestLapDurationMs)
+    {
+        var header =
+            $"{session.SessionLabel}   ·   {TimeSpan.FromSeconds(session.SessionDurationSeconds):h\\:mm\\:ss}";
+        if (fastestLapDurationMs is not null)
+        {
+            header = $"{header}  ({FormatLapTime(fastestLapDurationMs.Value / 1000d)})";
+        }
+
+        return IsWetSession(session)
+            ? $"{header}  (wet)"
+            : header;
+    }
+
+    private bool IsWetSession(SessionInfo session) =>
+        GetSessionEdits(session).TrackCondition.Contains("WET", StringComparison.OrdinalIgnoreCase);
+
+    private ContextMenu CreateVehicleContextMenu(TrackCarGroup car)
+    {
+        var menu = CreateThemedContextMenu();
+        var assignMenu = new MenuItem { Header = "Assign vehicle name" };
+        var aliases = car.Sessions.Select(session => session.VehicleAlias)
+            .Where(alias => !string.IsNullOrWhiteSpace(alias))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        foreach (var vehicleName in _vehicleCatalog.Names
+                     .Concat(_customVehicleNames)
+                     .Where(name => !IsVehicleHidden(name))
+                     .Distinct(StringComparer.CurrentCultureIgnoreCase)
+                     .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase))
+        {
+            var item = new MenuItem
+            {
+                Header = vehicleName,
+                Tag = new VehicleAssignment(aliases, vehicleName, car.Sessions),
+                IsEnabled = aliases.Length > 0
+            };
+            item.Click += AssignVehicleName_Click;
+            assignMenu.Items.Add(item);
+        }
+
+        if (assignMenu.Items.Count == 0)
+        {
+            assignMenu.Items.Add(new MenuItem
+            {
+                Header = "No catalog vehicles available",
+                IsEnabled = false
+            });
+        }
+
+        menu.Items.Add(assignMenu);
+        return menu;
+    }
+
+    private ContextMenu CreateThemedContextMenu()
+    {
+        var menuItemStyle = (Style)FindResource("DarkMenuItemStyle");
+        var menu = new ContextMenu
+        {
+            Style = (Style)FindResource("DarkContextMenuStyle"),
+            ItemContainerStyle = menuItemStyle
+        };
+        menu.Resources[typeof(MenuItem)] = menuItemStyle;
+        return menu;
+    }
+
+    private void AssignVehicleName_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Tag: VehicleAssignment assignment })
+        {
+            return;
+        }
+
+        var updatedMappings = new Dictionary<string, string>(_vehicleMappings, StringComparer.OrdinalIgnoreCase);
+        foreach (var alias in assignment.Aliases)
+        {
+            updatedMappings[alias] = assignment.VehicleName;
+        }
+
+        var updatedSettings = new ViewerSettings
+        {
+            DistanceUnits = _viewerSettings.DistanceUnits,
+            HiddenVehicleNames = _viewerSettings.HiddenVehicleNames,
+            CustomVehicleNames = _viewerSettings.CustomVehicleNames
+                .Append(assignment.VehicleName)
+                .Where(name => !_vehicleCatalog.Names.Contains(name, StringComparer.CurrentCultureIgnoreCase))
+                .Distinct(StringComparer.CurrentCultureIgnoreCase)
+                .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase)
+                .ToList(),
+            VehicleMappings = updatedMappings
+        };
+        var mappingPath = GetViewerSettingsPath();
+        try
+        {
+            var parentDirectory = Path.GetDirectoryName(mappingPath);
+            if (!string.IsNullOrWhiteSpace(parentDirectory))
+            {
+                Directory.CreateDirectory(parentDirectory);
+            }
+
+            File.WriteAllText(mappingPath, JsonSerializer.Serialize(updatedSettings, JsonOptions));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+            MessageBox.Show(this,
+                $"The vehicle mapping could not be saved to {mappingPath}.{Environment.NewLine}{exception.Message}",
+                "Could not save vehicle mapping", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
+        _vehicleMappings.Clear();
+        foreach (var (alias, name) in updatedMappings)
+        {
+            _vehicleMappings[alias] = name;
+        }
+        _viewerSettings = updatedSettings;
+        _customVehicleNames = updatedSettings.CustomVehicleNames;
+        UpdateVehicleChoices();
+
+        BuildSessionTree();
+        var assignedNode = SessionTree.Items.OfType<TreeViewItem>()
+            .Where(track => track.Tag is TrackLocation)
+            .SelectMany(track => track.Items.OfType<TreeViewItem>()
+                .Where(car => car.Tag is TrackCarGroup group &&
+                              group.Sessions.Any(session => assignment.Sessions.Contains(session))))
+            .FirstOrDefault();
+        if (assignedNode is not null)
+        {
+            ExpandAncestors(assignedNode);
+            assignedNode.IsSelected = true;
+            assignedNode.BringIntoView();
+        }
+
+        StatusText.Text = $"Assigned {assignment.VehicleName} to {assignment.Aliases.Count} vehicle alias(es).";
+    }
+
+    private sealed record VehicleAssignment(
+        IReadOnlyList<string> Aliases,
+        string VehicleName,
+        IReadOnlyList<SessionInfo> Sessions);
+
+    private async Task LoadFastestLapHeadersAsync(int generation)
+    {
+        IProgress<(SessionInfo Session, double? DurationMs)> progress =
+            new Progress<(SessionInfo Session, double? DurationMs)>(result =>
+        {
+            if (generation != _treeGeneration)
+            {
+                return;
+            }
+
+            if (result.DurationMs is double durationMs)
+            {
+                _fastestLapTimesBySession[result.Session.FilePath] = durationMs;
+            }
+
+            var node = FindSessionNode(result.Session);
+            if (node is not null)
+            {
+                node.Header = FormatSessionHeader(result.Session, result.DurationMs);
+                if (IsWetSession(result.Session))
+                {
+                    node.Foreground = Brushes.DeepSkyBlue;
+                }
+            }
+
+            if (TrackOverviewPanel.Visibility == Visibility.Visible &&
+                _selectedLocation is not null &&
+                _overviewSessions.Any(session => session.FilePath.Equals(
+                    result.Session.FilePath, StringComparison.OrdinalIgnoreCase)))
+            {
+                UpdateTrackStatistics(_selectedLocation, _overviewSessions, _overviewLapCounts);
+            }
+        });
+        List<string> failures = [];
+
+        await Task.Run(() =>
+        {
+            foreach (var session in _sessions)
+            {
+                try
+                {
+                    progress.Report((session, TelemetryLoader.ReadFastestLapDurationMs(session.FilePath)));
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                                   JsonException or InvalidDataException or ArgumentException)
+                {
+                    failures.Add($"{session.FileName}: {exception.Message}");
+                }
+            }
+        });
+
+        if (generation == _treeGeneration && failures.Count > 0)
+        {
+            MessageBox.Show(this,
+                $"Fastest-lap summaries could not be read for {failures.Count} sessions. " +
+                $"The first error was: {failures[0]}",
+                "Some fastest-lap times are unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private async void TrackLapLink_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: LapNavigationTarget target })
+        {
+            return;
+        }
+
+        var sessionNode = FindSessionNode(target.Session);
+        if (sessionNode is null)
+        {
+            MessageBox.Show(this, "The source session is no longer in the current library.",
+                "Lap is unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        ExpandAncestors(sessionNode);
+        var laps = await PopulateLapNodesAsync(target.Session, sessionNode);
+        if (laps is null)
+        {
+            return;
+        }
+
+        var lap = target.IsOptimal
+            ? TelemetryLoader.CreateOptimalLap(target.Session)
+            : laps.Where(candidate => !candidate.IsAverage)
+                .MinBy(candidate => candidate.DurationMs);
+        if (lap is null)
+        {
+            MessageBox.Show(this, "No matching lap telemetry was found for this session.",
+                "Lap is unavailable", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var lapNode = sessionNode.Items.OfType<TreeViewItem>()
+            .FirstOrDefault(node => node.Tag is LapInfo candidate &&
+                                    candidate.IsOptimal == target.IsOptimal &&
+                                    (target.IsOptimal || candidate.Index == lap.Index));
+        if (lapNode is null)
+        {
+            MessageBox.Show(this, "The lap could not be found in the session tree.",
+                "Lap is unavailable", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        ExpandAncestors(lapNode);
+        lapNode.IsSelected = true;
+        lapNode.BringIntoView();
+        await SelectLapAsync(lap);
+    }
+
+    private static void ExpandAncestors(TreeViewItem node)
+    {
+        ItemsControl? parent = ItemsControl.ItemsControlFromItemContainer(node);
+        while (parent is TreeViewItem parentNode)
+        {
+            parentNode.IsExpanded = true;
+            parent = ItemsControl.ItemsControlFromItemContainer(parentNode);
+        }
+    }
+
+    private ContextMenu CreateLapContextMenu(LapInfo lap)
+    {
+        var menu = CreateThemedContextMenu();
+        var setReference = new MenuItem
+        {
+            Header = "Use as reference lap",
+            Tag = lap
+        };
+        setReference.Click += SetReferenceLap_Click;
+        menu.Items.Add(setReference);
+
+        var clearReference = new MenuItem
+        {
+            Header = "Clear reference lap",
+            IsEnabled = _referenceLap is not null
+        };
+        clearReference.Click += ClearReferenceLap_Click;
+        menu.Items.Add(clearReference);
+        menu.Opened += (_, _) => clearReference.IsEnabled = _referenceLap is not null;
+
+        return menu;
+    }
+
+    private async void SetReferenceLap_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Tag: LapInfo lap })
+        {
+            return;
+        }
+
+        if (_primaryLap is not null &&
+            (!_trackBySession.TryGetValue(_primaryLap.Session.FilePath, out var primaryTrack) ||
+             !_trackBySession.TryGetValue(lap.Session.FilePath, out var referenceTrack) ||
+             !ReferenceEquals(primaryTrack, referenceTrack)))
+        {
+            MessageBox.Show(this, "Choose a reference lap from the same track as the selected lap.",
+                "Reference must be from the same track", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        _referenceLap = lap;
+        UpdateReferenceHeader();
+        if (_primaryLap is not null)
+        {
+            await LoadSelectedTracesAsync();
+        }
+    }
+
+    private async void ClearReferenceLap_Click(object sender, RoutedEventArgs e)
+    {
+        _referenceLap = null;
+        _referenceTrace = null;
+        UpdateReferenceHeader();
+        if (_primaryLap is not null)
+        {
+            await LoadSelectedTracesAsync();
+        }
+    }
+
+    private async Task SelectLapAsync(LapInfo lap)
+    {
+        _primaryLap = lap;
+        _selectedSession = lap.Session;
+        _selectedLocation = _trackBySession[lap.Session.FilePath];
+        DataViewPanel.Visibility = Visibility.Visible;
+        TrackOverviewPanel.Visibility = Visibility.Collapsed;
+        SessionDetailsPanel.Visibility = Visibility.Visible;
+        TrackTitleText.Text = _selectedLocation.DisplayName;
+        SessionSubtitleText.Text =
+            $"{lap.Session.LocalStart:dddd, MMMM d, yyyy}  ·  {lap.Session.SessionLabel}  ·  " +
+            $"{GetDriverName(lap.Session)}  ·  {lap.Label}  ·  " +
+            $"{GetVehicleName(lap.Session)}  ·  {GetSessionEdits(lap.Session).TrackCondition}";
+        PopulateSessionEditor(lap.Session);
+
+        if (_referenceLap is not null &&
+            (!_trackBySession.TryGetValue(_referenceLap.Session.FilePath, out var referenceTrack) ||
+             !ReferenceEquals(referenceTrack, _selectedLocation)))
+        {
+            _referenceLap = null;
+            _referenceTrace = null;
+            UpdateReferenceHeader();
+        }
+
+        await LoadSelectedTracesAsync();
+    }
+
+    private async Task LoadSelectedTracesAsync()
+    {
+        if (_primaryLap is null)
+        {
+            return;
+        }
+
+        var generation = ++_loadGeneration;
+        var primary = _primaryLap;
+        var reference = _referenceLap;
+        StatusText.Text = $"Loading {primary.Label} telemetry…";
+
+        try
+        {
+            var primaryTask = Task.Run(() => TelemetryLoader.ReadTrace(primary));
+            var referenceTask = reference is null
+                ? Task.FromResult<SessionTrace?>(null)
+                : Task.Run<SessionTrace?>(() => TelemetryLoader.ReadTrace(reference));
+            await Task.WhenAll((Task)primaryTask, referenceTask);
+
+            if (generation != _loadGeneration)
+            {
+                return;
+            }
+
+            _primaryTrace = primaryTask.Result;
+            _referenceTrace = referenceTask.Result;
+            _cursorDistanceM = 0;
+            UpdateCharts();
+            UpdateStatistics();
+            StatusText.Text =
+                $"Showing {_primaryTrace.Points.Count:N0} samples from {primary.Label}. " +
+                $"Speed is converted to {SpeedChart.Unit}; acceleration axes are shown in g.";
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                           JsonException or InvalidDataException or ArgumentException)
+        {
+            if (generation != _loadGeneration)
+            {
+                return;
+            }
+
+            _primaryTrace = null;
+            _referenceTrace = null;
+            UpdateCharts();
+            StatusText.Text = "Could not load lap telemetry.";
+            MessageBox.Show(this, exception.Message, "Lap could not be loaded",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void UpdateCharts()
+    {
+        if (_primaryTrace is null)
+        {
+            SpeedChart.Lines = [];
+            GForceChart.Lines = [];
+            DeltaChart.Lines = [];
+            TrackMapView.Traces = [];
+            return;
+        }
+
+        var traces = new List<SessionTrace> { _primaryTrace };
+        if (_referenceTrace is not null)
+        {
+            traces.Add(_referenceTrace);
+        }
+
+        var maxDistance = _primaryTrace.DistanceM;
+        SpeedChart.MaxDistanceM = maxDistance;
+        GForceChart.MaxDistanceM = maxDistance;
+        DeltaChart.MaxDistanceM = maxDistance;
+
+        SpeedChart.Lines = traces.Select((trace, index) => new ChartLine(
+            index == 0 ? "A" : "B",
+            trace.Points.Select(point => new ChartValue(
+                point.DistanceM,
+                point.SpeedMps * (UseImperialDistance ? 2.236936292 : 3.6))).ToArray(),
+            index == 0 ? PrimaryColor : ReferenceColor)).ToArray();
+
+        var gForceLines = new List<ChartLine>();
+        foreach (var (trace, index) in traces.Select((trace, index) => (trace, index)))
+        {
+            var label = index == 0 ? "A" : "B";
+            var color = index == 0 ? PrimaryColor : ReferenceColor;
+            gForceLines.Add(new ChartLine($"{label} lateral", trace.Points
+                .Select(point => new ChartValue(point.DistanceM, point.LateralG)).ToArray(), color));
+            gForceLines.Add(new ChartLine($"{label} longitudinal", trace.Points
+                .Select(point => new ChartValue(point.DistanceM, point.LongitudinalG)).ToArray(), color, Dashed: true));
+        }
+
+        GForceChart.Lines = gForceLines;
+        DeltaChart.Lines = _referenceTrace is null
+            ? []
+            : [new ChartLine("A − B", _primaryTrace.Points.Select(point =>
+                new ChartValue(
+                    point.DistanceM,
+                    point.DistanceM <= _referenceTrace.DistanceM
+                        ? (point.TimeMs - TelemetryLoader.InterpolateTimeMs(_referenceTrace.Points, point.DistanceM)) / 1000d
+                        : double.NaN)).ToArray(), PrimaryColor)];
+
+        TrackMapView.Traces = traces;
+        SetCursorDistance(_cursorDistanceM);
+        UpdateReferenceHeader();
+    }
+
+    private void UpdateStatistics()
+    {
+        if (_primaryTrace is null)
+        {
+            PrimaryLapText.Text = "—";
+            ReferenceLapText.Text = _referenceTrace is null
+                ? "—"
+                : FormatLapTime(_referenceTrace.LapDurationSeconds);
+            LapDeltaText.Text = "—";
+            LapDeltaText.Foreground = Brushes.White;
+            return;
+        }
+
+        PrimaryLapText.Text = FormatLapTime(_primaryTrace.LapDurationSeconds);
+        if (_referenceTrace is null)
+        {
+            ReferenceLapText.Text = "—";
+            LapDeltaText.Text = "—";
+            LapDeltaText.Foreground = Brushes.White;
+            return;
+        }
+
+        ReferenceLapText.Text = FormatLapTime(_referenceTrace.LapDurationSeconds);
+        var delta = _primaryTrace.LapDurationSeconds - _referenceTrace.LapDurationSeconds;
+        LapDeltaText.Text = $"{(delta > 0 ? "+" : string.Empty)}{delta:0.000}s";
+        LapDeltaText.Foreground = delta <= 0 ? Brushes.LightGreen : Brushes.Orange;
+    }
+
+    private void UpdateReferenceHeader()
+    {
+        ReferenceLapHeaderText.Text = _referenceLap?.ReferenceLabel ?? "Right-click a lap to set reference";
+        UpdateStatistics();
+    }
+
+    private void Chart_DistanceHovered(double distanceM) => SetCursorDistance(distanceM);
+
+    private void SetCursorDistance(double distanceM)
+    {
+        _cursorDistanceM = distanceM;
+        SpeedChart.CursorDistanceM = distanceM;
+        GForceChart.CursorDistanceM = distanceM;
+        DeltaChart.CursorDistanceM = distanceM;
+        TrackMapView.CursorDistanceM = distanceM;
+
+        if (_primaryTrace is null)
+        {
+            CursorDistanceText.Text = "—";
+            return;
+        }
+
+        var primaryDistance = Math.Clamp(distanceM, 0, _primaryTrace.DistanceM);
+        var deltaText = string.Empty;
+        if (_referenceTrace is not null && primaryDistance <= _referenceTrace.DistanceM)
+        {
+            var primaryTime = TelemetryLoader.InterpolateTimeMs(_primaryTrace.Points, primaryDistance);
+            var referenceTime = TelemetryLoader.InterpolateTimeMs(_referenceTrace.Points, primaryDistance);
+            var delta = (primaryTime - referenceTime) / 1000d;
+            deltaText = $"   ·   Δ {(delta > 0 ? "+" : string.Empty)}{delta:0.000}s";
+        }
+
+        var cursorLabel = UseImperialDistance
+            ? $"{primaryDistance * 3.28084:0} ft"
+            : $"{primaryDistance:0} m";
+        CursorDistanceText.Text = $"{cursorLabel}{deltaText}";
+    }
+
+    private async Task ShowTrackOverviewAsync(
+        TrackLocation location,
+        IReadOnlyList<SessionInfo>? visibleSessions,
+        string? groupName = null)
+    {
+        var generation = ++_overviewGeneration;
+        DataViewPanel.Visibility = Visibility.Collapsed;
+        TrackOverviewPanel.Visibility = Visibility.Visible;
+        SessionDetailsPanel.Visibility = Visibility.Collapsed;
+        var sessions = (visibleSessions ?? location.Sessions)
+            .Where(session => !IsVehicleHidden(GetVehicleName(session)))
+            .ToArray();
+        _selectedLocation = location;
+        _overviewSessions = sessions;
+        _overviewLapCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        OverviewTrackTitle.Text = groupName is null
+            ? location.DisplayName
+            : $"{location.DisplayName}  /  {groupName}";
+        UpdateTrackOverviewDistanceLabels(location);
+        OverviewVehicleCount.Text = sessions.Select(GetVehicleName)
+            .Distinct(StringComparer.CurrentCultureIgnoreCase).Count().ToString("N0");
+        OverviewSessionCount.Text = sessions.Length.ToString("N0");
+        OverviewLapCount.Text = "Counting…";
+        OverviewStatusText.Text = "Loading the reference line and session statistics…";
+        TrackCarStatsList.ItemsSource = Array.Empty<TrackCarStats>();
+
+        try
+        {
+            IReadOnlyList<TrackPoint> meanlinePoints = [];
+            var meanlinePath = location.MeanlinePath;
+            if (meanlinePath is not null)
+            {
+                if (_meanlineCache.TryGetValue(meanlinePath, out var cachedPoints))
+                {
+                    meanlinePoints = cachedPoints;
+                }
+                else
+                {
+                    meanlinePoints = await Task.Run(() => TelemetryLoader.ReadMeanlinePoints(meanlinePath));
+                    _meanlineCache[meanlinePath] = meanlinePoints;
+                }
+            }
+
+            if (generation != _overviewGeneration)
+            {
+                return;
+            }
+
+            TrackOverviewMap.MeanlinePoints = meanlinePoints;
+            TrackOverviewMap.Traces = [];
+
+            var progress = new Progress<int>(completed =>
+            {
+                if (generation == _overviewGeneration)
+                {
+                    OverviewStatusText.Text = $"Counting laps from session files… {completed:N0}/{location.Sessions.Count:N0}";
+                }
+            });
+            var lapCounts = await GetTrackLapCountsAsync(location, progress);
+            if (generation != _overviewGeneration)
+            {
+                return;
+            }
+
+            _overviewLapCounts = lapCounts;
+            UpdateTrackStatistics(location, sessions, lapCounts);
+            StatusText.Text = $"Showing track overview for {location.DisplayName}.";
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                           JsonException or InvalidDataException or ArgumentException)
+        {
+            if (generation != _overviewGeneration)
+            {
+                return;
+            }
+
+            OverviewLapCount.Text = "Unavailable";
+            OverviewStatusText.Text = "Track data could not be fully loaded.";
+            StatusText.Text = "Could not load track overview.";
+            _trackStatsTasks.Remove(location.Key);
+            MessageBox.Show(this, exception.Message, "Track overview could not be loaded",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private Task<IReadOnlyDictionary<string, int>> GetTrackLapCountsAsync(
+        TrackLocation location,
+        IProgress<int> progress)
+    {
+        if (_trackStatsTasks.TryGetValue(location.Key, out var existing))
+        {
+            return existing;
+        }
+
+        var task = Task.Run<IReadOnlyDictionary<string, int>>(() =>
+        {
+            var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var completed = 0;
+            foreach (var session in location.Sessions)
+            {
+                var count = TelemetryLoader.ReadLapCount(session.FilePath);
+                result[session.FilePath] = count;
+                progress.Report(++completed);
+            }
+
+            return result;
+        });
+        _trackStatsTasks[location.Key] = task;
+        return task;
+    }
+
+    private void UpdateTrackStatistics(
+        TrackLocation location,
+        IReadOnlyList<SessionInfo> visibleSessions,
+        IReadOnlyDictionary<string, int> lapCounts)
+    {
+        var vehicleGroups = visibleSessions.GroupBy(GetVehicleName, StringComparer.CurrentCultureIgnoreCase)
+            .OrderBy(group => group.Key, StringComparer.CurrentCultureIgnoreCase)
+            .ToArray();
+        var rows = vehicleGroups.Select(group =>
+        {
+            var sessions = group.ToArray();
+            var laps = sessions.Sum(session => lapCounts.TryGetValue(session.FilePath, out var count) ? count : 0);
+            var conditions = sessions.Select(session => GetSessionEdits(session).TrackCondition)
+                .Where(condition => !string.IsNullOrWhiteSpace(condition))
+                .Distinct(StringComparer.CurrentCultureIgnoreCase)
+                .OrderBy(condition => condition, StringComparer.CurrentCultureIgnoreCase);
+            var drivers = sessions.Select(GetDriverName)
+                .Where(driver => !string.IsNullOrWhiteSpace(driver) && driver != "Unknown driver")
+                .Distinct(StringComparer.CurrentCultureIgnoreCase)
+                .OrderBy(driver => driver, StringComparer.CurrentCultureIgnoreCase);
+            var fastestLapSession = sessions
+                .Where(session => _fastestLapTimesBySession.ContainsKey(session.FilePath))
+                .MinBy(session => _fastestLapTimesBySession[session.FilePath]);
+            var optimalLap = sessions
+                .Select(TelemetryLoader.CreateOptimalLap)
+                .OfType<LapInfo>()
+                .Where(lap => double.IsFinite(lap.DurationMs) && lap.DurationMs > 0)
+                .MinBy(lap => lap.DurationMs);
+            return new TrackCarStats(
+                group.Key,
+                sessions.Length,
+                laps.ToString("N0"),
+                string.Join(" · ", conditions),
+                string.Join(" · ", drivers),
+                fastestLapSession is null
+                    ? null
+                    : new LapNavigationTarget(
+                        fastestLapSession,
+                        _fastestLapTimesBySession[fastestLapSession.FilePath],
+                        false),
+                optimalLap is null
+                    ? null
+                    : new LapNavigationTarget(optimalLap.Session, optimalLap.DurationMs, true));
+        }).ToArray();
+
+        TrackCarStatsList.ItemsSource = rows;
+        OverviewVehicleCount.Text = vehicleGroups.Length.ToString("N0");
+        OverviewSessionCount.Text = visibleSessions.Count.ToString("N0");
+        OverviewLapCount.Text = visibleSessions.Sum(session =>
+            lapCounts.TryGetValue(session.FilePath, out var count) ? count : 0).ToString("N0");
+        OverviewStatusText.Text =
+            $"{location.DisplayName} · {visibleSessions.Count:N0} sessions · {vehicleGroups.Length:N0} vehicles";
+    }
+
+    private void SaveSessionDetails_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedSession is null)
+        {
+            return;
+        }
+
+        var vehicleName = VehicleNameCombo.Text.Trim();
+        if (string.IsNullOrWhiteSpace(vehicleName))
+        {
+            MessageBox.Show(this, "Enter the car or vehicle name for this session.",
+                "Vehicle name required", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        _sessionEdits[_selectedSession.SessionGuid] = new SessionEdits(
+            vehicleName,
+            string.IsNullOrWhiteSpace(TrackConditionCombo.Text) ? "UNKNOWN" : TrackConditionCombo.Text.Trim().ToUpperInvariant(),
+            string.IsNullOrWhiteSpace(RaceTypeBox.Text) ? "TRACK" : RaceTypeBox.Text.Trim(),
+            DriverNameBox.Text.Trim());
+        if (!SaveSessionEdits())
+        {
+            return;
+        }
+
+        BuildSessionTree();
+        var node = FindSessionNode(_selectedSession);
+        if (node is not null)
+        {
+            ExpandAncestors(node);
+            node.IsSelected = true;
+            node.BringIntoView();
+        }
+
+        StatusText.Text = "Session vehicle and conditions saved.";
+    }
+
+    private TreeViewItem? FindSessionNode(SessionInfo session)
+    {
+        foreach (var track in SessionTree.Items.OfType<TreeViewItem>())
+        foreach (var car in track.Items.OfType<TreeViewItem>())
+        foreach (var driver in car.Items.OfType<TreeViewItem>().Where(node => node.Tag is TrackDriverGroup))
+        foreach (var date in driver.Items.OfType<TreeViewItem>())
+        foreach (var node in date.Items.OfType<TreeViewItem>())
+        {
+            if (node.Tag is SessionInfo candidate && candidate.SessionGuid == session.SessionGuid)
+            {
+                return node;
+            }
+        }
+
+        return null;
+    }
+
+    private string GetVehicleName(SessionInfo session)
+    {
+        if (!string.IsNullOrWhiteSpace(session.VehicleAlias) &&
+            _vehicleMappings.TryGetValue(session.VehicleAlias, out var mappedName))
+        {
+            return mappedName;
+        }
+
+        return _sessionEdits.TryGetValue(session.SessionGuid, out var edits) &&
+               !string.IsNullOrWhiteSpace(edits.VehicleName)
+            ? edits.VehicleName
+            : _vehicleCatalog.ResolveAlias(session.VehicleAlias) ?? session.DefaultVehicleName;
+    }
+
+    private bool IsVehicleHidden(string vehicleName) =>
+        _viewerSettings.HiddenVehicleNames.Contains(vehicleName, StringComparer.CurrentCultureIgnoreCase);
+
+    private SessionEdits GetSessionEdits(SessionInfo session) =>
+        _sessionEdits.TryGetValue(session.SessionGuid, out var edits)
+            ? edits with
+            {
+                VehicleName = GetVehicleName(session),
+                TrackCondition = string.IsNullOrWhiteSpace(edits.TrackCondition)
+                    ? string.IsNullOrWhiteSpace(session.TrackCondition) ? "UNKNOWN" : session.TrackCondition
+                    : edits.TrackCondition,
+                RaceType = string.IsNullOrWhiteSpace(edits.RaceType)
+                    ? string.IsNullOrWhiteSpace(session.RaceType) ? "TRACK" : session.RaceType
+                    : edits.RaceType,
+                DriverName = string.IsNullOrWhiteSpace(edits.DriverName)
+                    ? GetProfileDriverName(session)
+                    : edits.DriverName
+            }
+            : new SessionEdits(
+                GetVehicleName(session),
+                string.IsNullOrWhiteSpace(session.TrackCondition) ? "UNKNOWN" : session.TrackCondition,
+                string.IsNullOrWhiteSpace(session.RaceType) ? "TRACK" : session.RaceType,
+                GetProfileDriverName(session));
+
+    private string GetDriverName(SessionInfo session) => GetSessionEdits(session).DriverName;
+
+    private string GetProfileDriverName(SessionInfo session) =>
+        _driverNames.TryGetValue(session.GarminGuid, out var driverName)
+            ? driverName
+            : "Unknown driver";
+
+    private void PopulateSessionEditor(SessionInfo session)
+    {
+        var edits = GetSessionEdits(session);
+        VehicleNameCombo.Text = edits.VehicleName;
+        DriverNameBox.Text = edits.DriverName;
+        TrackConditionCombo.Text = edits.TrackCondition;
+        RaceTypeBox.Text = edits.RaceType;
+        var vehicleDescription = string.IsNullOrWhiteSpace(session.VehicleAlias)
+            ? "No vehicle alias was included in the session metadata."
+            : _vehicleCatalog.ResolveAlias(session.VehicleAlias) is null
+                ? $"No catalog vehicle ID matches alias {session.VehicleAlias}. Select a car above."
+                : $"Vehicle alias: {session.VehicleAlias}";
+        var driverDescription = string.IsNullOrWhiteSpace(session.GarminGuid)
+            ? "No Garmin profile ID was included in the session metadata."
+            : $"Garmin profile: {session.GarminGuid}";
+        SessionAliasText.Text = $"{vehicleDescription} · {driverDescription}";
+    }
+
+    private void LoadSessionEdits()
+    {
+        if (!File.Exists(_sessionEditsPath))
+        {
+            return;
+        }
+
+        try
+        {
+            var savedEdits = JsonSerializer.Deserialize<Dictionary<string, SessionEdits>>(
+                File.ReadAllText(_sessionEditsPath));
+            if (savedEdits is not null)
+            {
+                foreach (var (key, value) in savedEdits)
+                {
+                    if (!string.IsNullOrWhiteSpace(value.VehicleName))
+                    {
+                        _sessionEdits[key] = value;
+                    }
+                }
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+            MessageBox.Show(this,
+                $"Saved session corrections could not be loaded. Original session metadata will be used.{Environment.NewLine}{exception.Message}",
+                "Session corrections could not be loaded", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    private bool SaveSessionEdits()
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(_sessionEditsPath)!);
+            File.WriteAllText(_sessionEditsPath, JsonSerializer.Serialize(_sessionEdits, JsonOptions));
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+            MessageBox.Show(this, $"Session corrections could not be saved.{Environment.NewLine}{exception.Message}",
+                "Could not save session details", MessageBoxButton.OK, MessageBoxImage.Error);
+            return false;
+        }
+    }
+
+    private static double DistanceMeters(double latitudeA, double longitudeA, double latitudeB, double longitudeB)
+    {
+        const double earthRadiusM = 6_371_000;
+        var latitudeDelta = DegreesToRadians(latitudeB - latitudeA);
+        var longitudeDelta = DegreesToRadians(longitudeB - longitudeA);
+        var a = Math.Pow(Math.Sin(latitudeDelta / 2), 2) +
+                Math.Cos(DegreesToRadians(latitudeA)) * Math.Cos(DegreesToRadians(latitudeB)) *
+                Math.Pow(Math.Sin(longitudeDelta / 2), 2);
+        return earthRadiusM * 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
+    }
+
+    private static double DegreesToRadians(double degrees) => degrees * Math.PI / 180;
+
+    private static string? FindDefaultDataFolder()
+    {
+        var rememberedFolderPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "TrackTelemetryViewer",
+            "last-data-folder.txt");
+        if (File.Exists(rememberedFolderPath))
+        {
+            var rememberedFolder = File.ReadAllText(rememberedFolderPath).Trim();
+            if (Directory.Exists(rememberedFolder) &&
+                TelemetryLoader.EnumerateFilesRecursively(
+                    rememberedFolder, "autosport-performance-*.json").Any())
+            {
+                return rememberedFolder;
+            }
+        }
+
+        var candidates = new[]
+        {
+            Path.Combine(AppContext.BaseDirectory, "Data"),
+            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Data")),
+            Path.Combine(Environment.CurrentDirectory, "Data")
+        };
+
+        return candidates.FirstOrDefault(candidate =>
+            Directory.Exists(candidate) &&
+            TelemetryLoader.EnumerateFilesRecursively(candidate, "autosport-performance-*.json").Any());
+    }
+
+    private static string FormatLapTime(double seconds)
+    {
+        var time = TimeSpan.FromSeconds(seconds);
+        return $"{(int)time.TotalMinutes}:{time.Seconds:00}.{time.Milliseconds:000}";
+    }
+}

@@ -1,0 +1,271 @@
+using System.Globalization;
+using System.Windows;
+using System.Windows.Input;
+using System.Windows.Media;
+
+namespace TrackTelemetryViewer;
+
+internal sealed class TelemetryChart : FrameworkElement
+{
+    private static readonly Brush GridBrush = new SolidColorBrush(Color.FromRgb(42, 51, 61));
+    private static readonly Brush TextBrush = new SolidColorBrush(Color.FromRgb(144, 157, 171));
+    private static readonly Pen AxisPen = new(new SolidColorBrush(Color.FromRgb(75, 87, 100)), 1);
+    private static readonly Pen ZeroAxisPen = new(new SolidColorBrush(Color.FromRgb(135, 148, 162)), 1.5);
+    private static readonly Pen CursorPen = new(new SolidColorBrush(Color.FromRgb(236, 187, 83)), 1)
+    {
+        DashStyle = DashStyles.Dash
+    };
+
+    private IReadOnlyList<ChartLine> _lines = [];
+    private double _maxDistanceM = 1;
+    private double _cursorDistanceM = double.NaN;
+    private bool _useImperialDistance;
+    private DrawingGroup? _cachedStaticDrawing;
+    private Size _cachedDrawingSize;
+
+    public event Action<double>? DistanceHovered;
+
+    public TelemetryChart()
+    {
+        SnapsToDevicePixels = true;
+        MouseMove += HandleMouseMove;
+    }
+
+    public string Title { get; set; } = string.Empty;
+    public string Unit { get; set; } = string.Empty;
+    public bool UseImperialDistance
+    {
+        get => _useImperialDistance;
+        set
+        {
+            _useImperialDistance = value;
+            _cachedStaticDrawing = null;
+            InvalidateVisual();
+        }
+    }
+    public bool SymmetricRange { get; set; }
+
+    public IReadOnlyList<ChartLine> Lines
+    {
+        get => _lines;
+        set
+        {
+            _lines = value;
+            _cachedStaticDrawing = null;
+            InvalidateVisual();
+        }
+    }
+
+    public double MaxDistanceM
+    {
+        get => _maxDistanceM;
+        set
+        {
+            _maxDistanceM = Math.Max(1, value);
+            _cachedStaticDrawing = null;
+            InvalidateVisual();
+        }
+    }
+
+    public double CursorDistanceM
+    {
+        get => _cursorDistanceM;
+        set
+        {
+            _cursorDistanceM = value;
+            InvalidateVisual();
+        }
+    }
+
+    protected override void OnRender(DrawingContext drawingContext)
+    {
+        base.OnRender(drawingContext);
+        var size = new Size(ActualWidth, ActualHeight);
+        if (_cachedStaticDrawing is null || _cachedDrawingSize != size)
+        {
+            var cachedDrawing = new DrawingGroup();
+            using (var cachedContext = cachedDrawing.Open())
+            {
+                DrawStaticContent(cachedContext);
+            }
+
+            cachedDrawing.Freeze();
+            _cachedStaticDrawing = cachedDrawing;
+            _cachedDrawingSize = size;
+        }
+
+        drawingContext.DrawDrawing(_cachedStaticDrawing);
+        if (double.IsFinite(_cursorDistanceM) && _cursorDistanceM >= 0 && _cursorDistanceM <= _maxDistanceM)
+        {
+            var plot = new Rect(55, 42, Math.Max(1, ActualWidth - 70), Math.Max(1, ActualHeight - 78));
+            var x = plot.Left + _cursorDistanceM / _maxDistanceM * plot.Width;
+            drawingContext.DrawLine(CursorPen, new Point(x, plot.Top), new Point(x, plot.Bottom));
+        }
+    }
+
+    private void DrawStaticContent(DrawingContext drawingContext)
+    {
+        var width = ActualWidth;
+        var height = ActualHeight;
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        DrawText(drawingContext, Title, 14, 10, Brushes.White, 12, FontWeights.SemiBold);
+        DrawText(drawingContext, Unit, 14, 28, TextBrush, 10);
+
+        var legendWidth = _lines.Sum(line => Math.Max(48, line.Label.Length * 5.2) + 17);
+        var legendX = Math.Max(155, width - legendWidth - 12);
+        foreach (var line in _lines)
+        {
+            var samplePen = new Pen(line.Color, 1.5)
+            {
+                DashStyle = line.Dashed ? DashStyles.Dash : DashStyles.Solid
+            };
+            drawingContext.DrawLine(samplePen, new Point(legendX, 16), new Point(legendX + 14, 16));
+            DrawText(drawingContext, line.Label, legendX + 18, 10, TextBrush, 9);
+            legendX += Math.Max(48, line.Label.Length * 5.2) + 17;
+        }
+
+        var plot = new Rect(55, 42, Math.Max(1, width - 70), Math.Max(1, height - 78));
+        var values = _lines.SelectMany(line => line.Values)
+            .Where(value => double.IsFinite(value.Value))
+            .Select(value => value.Value)
+            .ToArray();
+        if (values.Length == 0)
+        {
+            DrawText(drawingContext, "No samples available", plot.Left + 10, plot.Top + 10, TextBrush, 11);
+            return;
+        }
+
+        var min = values.Min();
+        var max = values.Max();
+        if (SymmetricRange)
+        {
+            var extent = Math.Max(Math.Abs(min), Math.Abs(max));
+            min = -Math.Max(extent, 0.1);
+            max = Math.Max(extent, 0.1);
+        }
+        else if (Math.Abs(max - min) < 0.001)
+        {
+            min -= 1;
+            max += 1;
+        }
+        else
+        {
+            var padding = (max - min) * 0.08;
+            min -= padding;
+            max += padding;
+        }
+
+        min = Math.Min(min, 0);
+        max = Math.Max(max, 0);
+
+        drawingContext.DrawRectangle(null, AxisPen, plot);
+        for (var tick = 0; tick <= 4; tick++)
+        {
+            var y = plot.Top + plot.Height * tick / 4;
+            drawingContext.DrawLine(new Pen(GridBrush, 1), new Point(plot.Left, y), new Point(plot.Right, y));
+            var value = max - (max - min) * tick / 4;
+            DrawText(drawingContext, value.ToString("0.0", CultureInfo.InvariantCulture),
+                6, y - 7, TextBrush, 9);
+        }
+
+        for (var tick = 0; tick <= 5; tick++)
+        {
+            var x = plot.Left + plot.Width * tick / 5;
+            drawingContext.DrawLine(new Pen(GridBrush, 1), new Point(x, plot.Top), new Point(x, plot.Bottom));
+            var distance = _maxDistanceM * tick / 5 /
+                           (UseImperialDistance ? 1609.344 : 1000);
+            DrawText(drawingContext, $"{distance:0.0}",
+                x - 12, plot.Bottom + 5, TextBrush, 9);
+        }
+
+        var distanceLabel = UseImperialDistance ? "Distance (mi)" : "Distance (km)";
+        DrawText(drawingContext, distanceLabel, plot.Left + plot.Width / 2 - 33,
+            height - 15, TextBrush, 9);
+        drawingContext.PushClip(new RectangleGeometry(plot));
+        var zeroY = plot.Bottom - (0 - min) / (max - min) * plot.Height;
+        drawingContext.DrawLine(ZeroAxisPen, new Point(plot.Left, zeroY), new Point(plot.Right, zeroY));
+        foreach (var line in _lines)
+        {
+            var pen = new Pen(line.Color, 1.5)
+            {
+                DashStyle = line.Dashed ? DashStyles.Dash : DashStyles.Solid,
+                StartLineCap = PenLineCap.Round,
+                EndLineCap = PenLineCap.Round,
+                LineJoin = PenLineJoin.Round
+            };
+            var geometry = new StreamGeometry();
+            using (var context = geometry.Open())
+            {
+                var drawing = false;
+                foreach (var point in line.Values)
+                {
+                    if (!double.IsFinite(point.Value) || !double.IsFinite(point.DistanceM))
+                    {
+                        drawing = false;
+                        continue;
+                    }
+
+                    var x = plot.Left + point.DistanceM / _maxDistanceM * plot.Width;
+                    var y = plot.Bottom - (point.Value - min) / (max - min) * plot.Height;
+                    var position = new Point(x, y);
+                    if (!drawing)
+                    {
+                        context.BeginFigure(position, false, false);
+                        drawing = true;
+                    }
+                    else
+                    {
+                        context.LineTo(position, true, false);
+                    }
+                }
+            }
+
+            geometry.Freeze();
+            drawingContext.DrawGeometry(null, pen, geometry);
+        }
+
+        drawingContext.Pop();
+    }
+
+    private void HandleMouseMove(object sender, MouseEventArgs eventArgs)
+    {
+        var plotWidth = ActualWidth - 70;
+        if (plotWidth <= 0)
+        {
+            return;
+        }
+
+        var x = Mouse.GetPosition(this).X;
+        if (x < 55 || x > ActualWidth - 15)
+        {
+            return;
+        }
+
+        DistanceHovered?.Invoke(Math.Clamp((x - 55) / plotWidth * _maxDistanceM, 0, _maxDistanceM));
+    }
+
+    private static void DrawText(
+        DrawingContext context,
+        string text,
+        double x,
+        double y,
+        Brush brush,
+        double size,
+        FontWeight? weight = null)
+    {
+        var formatted = new FormattedText(
+            text,
+            CultureInfo.InvariantCulture,
+            FlowDirection.LeftToRight,
+            new Typeface(new FontFamily("Segoe UI"), FontStyles.Normal, weight ?? FontWeights.Normal,
+                FontStretches.Normal),
+            size,
+            brush,
+            VisualTreeHelper.GetDpi(Application.Current.MainWindow!).PixelsPerDip);
+        context.DrawText(formatted, new Point(x, y));
+    }
+}
