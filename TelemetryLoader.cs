@@ -490,6 +490,40 @@ internal static partial class TelemetryLoader
         return points;
     }
 
+    public static TrackSegmentMap? ReadMeanlineSegments(string filePath)
+    {
+        using var stream = File.OpenRead(filePath);
+        using var document = JsonDocument.Parse(stream);
+        var root = document.RootElement;
+        if (!root.TryGetProperty("referenceSegments", out var reference) ||
+            !reference.TryGetProperty("segments", out var segmentArray) ||
+            segmentArray.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var segments = segmentArray.EnumerateArray()
+            .Select(segment => (Start: GetNumber(segment, "startProgression"),
+                End: GetNumber(segment, "endProgression")))
+            .Where(segment => double.IsFinite(segment.Start) && double.IsFinite(segment.End))
+            .OrderBy(segment => segment.Start)
+            .ToArray();
+        if (segments.Length < 2)
+        {
+            return null;
+        }
+
+        // Neighbouring segments overlap slightly, so hand over halfway through the overlap.
+        var boundaries = new double[segments.Length - 1];
+        for (var index = 0; index < boundaries.Length; index++)
+        {
+            boundaries[index] = (segments[index].End + segments[index + 1].Start) / 2;
+        }
+
+        var length = GetNumber(root, "lengthM", segments[^1].End);
+        return length > 0 ? new TrackSegmentMap(boundaries, length) : null;
+    }
+
     public static VehicleCatalog ReadVehicleCatalog(string folder)
     {
         var filePath = EnumerateFilesRecursively(folder, "autosport-vehicles.json")

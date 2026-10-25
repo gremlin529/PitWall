@@ -9,8 +9,20 @@ internal sealed class TrackMap : FrameworkElement
 {
     private static readonly Brush GridBrush = new SolidColorBrush(Color.FromRgb(35, 44, 54));
     private static readonly Brush TextBrush = new SolidColorBrush(Color.FromRgb(144, 157, 171));
+    private static readonly Color[] SegmentPalette =
+    [
+        Color.FromRgb(229, 72, 77),
+        Color.FromRgb(70, 167, 88),
+        Color.FromRgb(142, 78, 198),
+        Color.FromRgb(245, 217, 10),
+        Color.FromRgb(18, 165, 148),
+        Color.FromRgb(233, 61, 130),
+        Color.FromRgb(194, 121, 43),
+        Color.FromRgb(153, 163, 173)
+    ];
     private IReadOnlyList<SessionTrace> _traces = [];
     private IReadOnlyList<TrackPoint> _meanlinePoints = [];
+    private TrackSegmentMap? _segmentMap;
     private double _cursorDistanceM = double.NaN;
     private DrawingGroup? _cachedStaticDrawing;
     private Size _cachedDrawingSize;
@@ -38,6 +50,17 @@ internal sealed class TrackMap : FrameworkElement
         set
         {
             _meanlinePoints = value;
+            _cachedStaticDrawing = null;
+            InvalidateVisual();
+        }
+    }
+
+    public TrackSegmentMap? SegmentMap
+    {
+        get => _segmentMap;
+        set
+        {
+            _segmentMap = value;
             _cachedStaticDrawing = null;
             InvalidateVisual();
         }
@@ -144,23 +167,41 @@ internal sealed class TrackMap : FrameworkElement
             14, 12, TextBrush, 9);
         if (meanlinePoints.Length > 0)
         {
-            var geometry = new StreamGeometry();
-            using (var context = geometry.Open())
+            if (_segmentMap is { } overviewSegments)
             {
-                context.BeginFigure(ProjectTrackPoint(meanlinePoints[0]), false, false);
-                foreach (var point in meanlinePoints.Skip(1))
-                {
-                    context.LineTo(ProjectTrackPoint(point), true, false);
-                }
+                DrawSegmentedPath(drawingContext,
+                    meanlinePoints.Select(point => (point.DistanceM, ProjectTrackPoint(point))).ToArray(),
+                    overviewSegments, 4, 1);
             }
-
-            geometry.Freeze();
-            drawingContext.DrawGeometry(null, new Pen(Brushes.LightSeaGreen, 3)
+            else
             {
-                StartLineCap = PenLineCap.Round,
-                EndLineCap = PenLineCap.Round,
-                LineJoin = PenLineJoin.Round
-            }, geometry);
+                var geometry = new StreamGeometry();
+                using (var context = geometry.Open())
+                {
+                    context.BeginFigure(ProjectTrackPoint(meanlinePoints[0]), false, false);
+                    foreach (var point in meanlinePoints.Skip(1))
+                    {
+                        context.LineTo(ProjectTrackPoint(point), true, false);
+                    }
+                }
+
+                geometry.Freeze();
+                drawingContext.DrawGeometry(null, new Pen(Brushes.LightSeaGreen, 3)
+                {
+                    StartLineCap = PenLineCap.Round,
+                    EndLineCap = PenLineCap.Round,
+                    LineJoin = PenLineJoin.Round
+                }, geometry);
+            }
+        }
+        else if (_segmentMap is { } sessionSegments && _traces.Count > 0)
+        {
+            DrawSegmentedPath(drawingContext,
+                _traces[0].Points
+                    .Where(point => double.IsFinite(point.Latitude) && double.IsFinite(point.Longitude))
+                    .Select(point => (point.DistanceM, ProjectTelemetry(point)))
+                    .ToArray(),
+                sessionSegments, 9, 0.5);
         }
 
         var legendY = 12d;
@@ -212,6 +253,65 @@ internal sealed class TrackMap : FrameworkElement
         }
 
         _projectedTraces = projectedTraces;
+    }
+
+    private static void DrawSegmentedPath(
+        DrawingContext drawingContext,
+        IReadOnlyList<(double DistanceM, Point Position)> points,
+        TrackSegmentMap segments,
+        double thickness,
+        double opacity)
+    {
+        if (points.Count < 2)
+        {
+            return;
+        }
+
+        var runIndex = segments.IndexAt(points[1].DistanceM);
+        var run = new List<Point> { points[0].Position };
+        void Flush()
+        {
+            if (run.Count < 2)
+            {
+                return;
+            }
+
+            var color = SegmentPalette[runIndex % SegmentPalette.Length];
+            var brush = new SolidColorBrush(color) { Opacity = opacity };
+            brush.Freeze();
+            var geometry = new StreamGeometry();
+            using (var context = geometry.Open())
+            {
+                context.BeginFigure(run[0], false, false);
+                foreach (var point in run.Skip(1))
+                {
+                    context.LineTo(point, true, false);
+                }
+            }
+
+            geometry.Freeze();
+            drawingContext.DrawGeometry(null, new Pen(brush, thickness)
+            {
+                StartLineCap = PenLineCap.Flat,
+                EndLineCap = PenLineCap.Flat,
+                LineJoin = PenLineJoin.Round
+            }, geometry);
+        }
+
+        for (var index = 1; index < points.Count; index++)
+        {
+            var pointIndex = segments.IndexAt(points[index].DistanceM);
+            if (pointIndex != runIndex)
+            {
+                Flush();
+                runIndex = pointIndex;
+                run = [points[index - 1].Position];
+            }
+
+            run.Add(points[index].Position);
+        }
+
+        Flush();
     }
 
     private static ProjectedTrackPoint? FindNearestPoint(

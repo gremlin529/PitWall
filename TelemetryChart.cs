@@ -11,12 +11,14 @@ internal sealed class TelemetryChart : FrameworkElement
     private static readonly Brush TextBrush = new SolidColorBrush(Color.FromRgb(144, 157, 171));
     private static readonly Pen AxisPen = new(new SolidColorBrush(Color.FromRgb(75, 87, 100)), 1);
     private static readonly Pen ZeroAxisPen = new(new SolidColorBrush(Color.FromRgb(135, 148, 162)), 1.5);
+    private static readonly Pen SegmentPen = new(new SolidColorBrush(Color.FromArgb(150, 150, 165, 180)), 1);
     private static readonly Pen CursorPen = new(new SolidColorBrush(Color.FromRgb(236, 187, 83)), 1)
     {
         DashStyle = DashStyles.Dash
     };
 
     private IReadOnlyList<ChartLine> _lines = [];
+    private IReadOnlyList<double> _segmentBoundariesM = [];
     private double _maxDistanceM = 1;
     private double _cursorDistanceM = double.NaN;
     private bool _useImperialDistance;
@@ -44,6 +46,17 @@ internal sealed class TelemetryChart : FrameworkElement
         }
     }
     public bool SymmetricRange { get; set; }
+
+    public IReadOnlyList<double> SegmentBoundariesM
+    {
+        get => _segmentBoundariesM;
+        set
+        {
+            _segmentBoundariesM = value;
+            _cachedStaticDrawing = null;
+            InvalidateVisual();
+        }
+    }
 
     public IReadOnlyList<ChartLine> Lines
     {
@@ -219,6 +232,17 @@ internal sealed class TelemetryChart : FrameworkElement
         DrawText(drawingContext, distanceLabel, plot.Left + plot.Width / 2 - 33,
             height - 15, TextBrush, 9);
         drawingContext.PushClip(new RectangleGeometry(plot));
+        foreach (var boundary in _segmentBoundariesM)
+        {
+            if (boundary <= 0 || boundary >= _maxDistanceM)
+            {
+                continue;
+            }
+
+            var boundaryX = plot.Left + boundary / _maxDistanceM * plot.Width;
+            drawingContext.DrawLine(SegmentPen, new Point(boundaryX, plot.Top), new Point(boundaryX, plot.Bottom));
+        }
+
         var zeroY = plot.Bottom - (0 - min) / (max - min) * plot.Height;
         drawingContext.DrawLine(ZeroAxisPen, new Point(plot.Left, zeroY), new Point(plot.Right, zeroY));
         foreach (var line in _lines)

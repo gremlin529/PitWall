@@ -476,9 +476,10 @@
                                                                     <TextBlock Text="{Binding VehicleName}"
                                                                                FontSize="10"
                                                                                Foreground="{StaticResource AccentBrush}"/>
-                                                                    <TextBlock Text="{Binding Sessions, StringFormat={}{0} sessions}"
-                                                                               FontSize="9"
-                                                                               Foreground="{StaticResource MutedBrush}"/>
+                                                                    <TextBlock FontSize="9"
+                                                                               Foreground="{StaticResource MutedBrush}">
+                                                                        <Run Text="{Binding Sessions, Mode=OneWay}"/><Run Text=" sessions · "/><Run Text="{Binding Laps, Mode=OneWay}"/><Run Text=" laps"/>
+                                                                    </TextBlock>
                                                                 </StackPanel>
                                                                 <StackPanel Grid.Column="1"
                                                                             VerticalAlignment="Center"

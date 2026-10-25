@@ -1,6 +1,7 @@
 data/*
 obj/*
 bin/*
+artifacts/*
 XrkReader/target/*
 PitWall.Avalonia/bin/*
 PitWall.Avalonia/obj/*
