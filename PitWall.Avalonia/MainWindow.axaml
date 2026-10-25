@@ -1,0 +1,147 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:app="clr-namespace:PitWallApp"
+        x:Class="PitWallApp.MainWindow"
+        Title="PitWall" Width="1440" Height="900" MinWidth="980" MinHeight="620">
+  <Grid RowDefinitions="62,*,28">
+    <Border Grid.Row="0" Background="{DynamicResource SidebarBrush}" BorderBrush="{DynamicResource BorderSoftBrush}"
+            BorderThickness="0,0,0,1">
+      <Grid Margin="22,0" ColumnDefinitions="*,Auto">
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <Viewbox Width="32" Height="32" Margin="0,0,11,0">
+            <Canvas Width="32" Height="32">
+              <Border Width="32" Height="32" CornerRadius="8" Background="#15343A" />
+              <Path Data="M 8,25 L 12,7" Stroke="#F2F5F7" StrokeThickness="1.5" StrokeLineCap="Round" />
+              <Path Data="M 12,7 C 15,5 18,7 23,5.5 L 22,14 C 18,15.5 15,13 10.5,15 Z" Stroke="#F2F5F7"
+                    StrokeThickness="1.2" StrokeJoin="Round" />
+              <Path Data="M 12,7.8 L 15.5,7.3 M 11.5,10.3 L 22.5,9.2 M 11,13 L 22.2,12" Stroke="#F2F5F7"
+                    StrokeThickness="0.8" />
+              <Path Data="M 15.5,7.3 L 15,14 M 19,6.6 L 18.5,14.3" Stroke="#F2F5F7" StrokeThickness="0.8" />
+              <Path Data="M 12.1,8 L 14.7,7.6 L 14.5,9.8 L 11.7,10.1 Z M 19.5,6.5 L 22.8,5.8 L 22.5,8.7 L 19.3,9 Z M 11,11.5 L 14.3,11.2 L 14,13.8 L 10.5,14.6 Z M 18.2,11.2 L 22.3,10.8 L 22,13.4 L 18,14.1 Z"
+                    Fill="#F2F5F7" />
+            </Canvas>
+          </Viewbox>
+          <TextBlock Text="PITWALL" FontSize="14" FontWeight="Bold" VerticalAlignment="Center" />
+          <TextBlock Text="  /  TELEMETRY" Classes="muted" FontSize="11" VerticalAlignment="Center"
+                     Margin="2,1,0,0" />
+        </StackPanel>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+          <TextBlock x:Name="SessionCountText" Text="No sessions loaded" Classes="muted" FontSize="11"
+                     VerticalAlignment="Center" Margin="0,0,6,0" />
+          <ComboBox x:Name="UnitsBox" Width="120" SelectedIndex="0">
+            <ComboBoxItem>Metric</ComboBoxItem>
+            <ComboBoxItem>Imperial</ComboBoxItem>
+          </ComboBox>
+          <Button x:Name="OpenButton" Content="Open data folder" />
+          <Button x:Name="SettingsButton" Content="⚙" FontSize="17" Padding="9,3"
+                  ToolTip.Tip="Settings" />
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <Grid Grid.Row="1">
+      <Grid x:Name="MainGrid">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="338" MinWidth="220" MaxWidth="760" />
+          <ColumnDefinition Width="6" />
+          <ColumnDefinition Width="*" MinWidth="420" />
+        </Grid.ColumnDefinitions>
+        <Border Grid.Column="0" Background="{DynamicResource SidebarBrush}"
+                BorderBrush="{DynamicResource BorderSoftBrush}" BorderThickness="0,0,1,0">
+          <Grid Margin="16,16,12,12" RowDefinitions="Auto,*">
+            <StackPanel Margin="3,0,0,13">
+              <TextBlock Text="SESSION LIBRARY" Classes="caption" FontSize="10" />
+              <TextBlock x:Name="FolderText" Text="Choose a folder containing session JSON files" FontSize="10"
+                         Foreground="#798693" TextWrapping="Wrap" Margin="0,6,0,0" />
+            </StackPanel>
+            <TreeView x:Name="SessionTree" Grid.Row="1">
+              <TreeView.ItemContainerTheme>
+                <ControlTheme x:DataType="TreeViewItem" TargetType="TreeViewItem"
+                              BasedOn="{StaticResource {x:Type TreeViewItem}}">
+                  <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" />
+                </ControlTheme>
+              </TreeView.ItemContainerTheme>
+              <TreeView.ItemTemplate>
+                <TreeDataTemplate ItemsSource="{Binding Children}">
+                  <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="{Binding Text}" Foreground="{Binding Foreground}" />
+                    <TextBlock Text="{Binding Suffix}" Foreground="{Binding SuffixForeground}" />
+                    <TextBlock Text="{Binding Tail}" Foreground="{Binding Foreground}" />
+                  </StackPanel>
+                </TreeDataTemplate>
+              </TreeView.ItemTemplate>
+            </TreeView>
+          </Grid>
+        </Border>
+
+        <GridSplitter x:Name="Splitter" Grid.Column="1" Width="6" HorizontalAlignment="Stretch"
+                      VerticalAlignment="Stretch" ResizeDirection="Columns" ResizeBehavior="PreviousAndNext"
+                      Background="#28323D" />
+
+        <Grid Grid.Column="2">
+          <Grid x:Name="DataPanel" Margin="19,15,19,12" RowDefinitions="Auto,Auto,*">
+            <Grid Margin="2,0,2,13" ColumnDefinitions="*,Auto">
+              <StackPanel>
+                <TextBlock x:Name="TrackTitleText" Text="Select a session" FontSize="21" FontWeight="SemiBold" />
+                <TextBlock x:Name="SessionSubtitleText" Text="Choose a lap from the session library to begin."
+                           Classes="muted" FontSize="11" Margin="0,3,0,0" />
+              </StackPanel>
+              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <Button x:Name="SetReferenceButton" Content="Use selected lap as reference" IsEnabled="False" />
+                <Button x:Name="ClearReferenceButton" Content="Clear reference" IsEnabled="False" />
+              </StackPanel>
+            </Grid>
+            <Grid Grid.Row="1" Margin="0,0,0,13" ColumnDefinitions="*,10,*,10,*,10,*">
+              <Border Classes="panel">
+                <StackPanel>
+                  <TextBlock Text="SESSION · LAP" Classes="caption" />
+                  <TextBlock x:Name="PrimaryLapText" Text="—" Classes="statValue" TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+              </Border>
+              <Border Grid.Column="2" Classes="panel">
+                <StackPanel>
+                  <TextBlock Text="REFERENCE · LAP" Classes="caption" />
+                  <TextBlock x:Name="ReferenceLapText" Text="—" Classes="statValue" TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+              </Border>
+              <Border Grid.Column="4" Classes="panel">
+                <StackPanel>
+                  <TextBlock Text="LAP DELTA · A − B" Classes="caption" />
+                  <TextBlock x:Name="LapDeltaText" Text="—" Classes="statValue" />
+                </StackPanel>
+              </Border>
+              <Border Grid.Column="6" Classes="panel">
+                <StackPanel>
+                  <TextBlock Text="DISTANCE AT CURSOR" Classes="caption" />
+                  <TextBlock x:Name="CursorDistanceText" Text="—" Classes="statValue" />
+                </StackPanel>
+              </Border>
+            </Grid>
+            <app:TraceView x:Name="Trace" Grid.Row="2" />
+          </Grid>
+          <app:TrackOverviewView x:Name="Overview" IsVisible="False" Margin="19,15,19,12" />
+        </Grid>
+      </Grid>
+
+      <Grid x:Name="LoadingIndicator" IsVisible="False" IsHitTestVisible="False" Background="#9911171D">
+        <Border HorizontalAlignment="Center" VerticalAlignment="Center" Background="#202A35"
+                BorderBrush="#394857" BorderThickness="1" CornerRadius="12" Padding="34,28" MinWidth="420">
+          <StackPanel HorizontalAlignment="Center">
+            <TextBlock Text="LOADING TELEMETRY" FontSize="11" FontWeight="Bold" Foreground="#94A0AD"
+                       HorizontalAlignment="Center" />
+            <TextBlock x:Name="LoadingDetailText" FontSize="15" Foreground="#E8EDF2" MaxWidth="560"
+                       TextTrimming="CharacterEllipsis" TextAlignment="Center" Margin="0,12,0,18" />
+            <ProgressBar Width="350" Height="12" IsIndeterminate="True" Foreground="#39C3D8"
+                         Background="#293542" BorderThickness="0" />
+          </StackPanel>
+        </Border>
+      </Grid>
+    </Grid>
+
+    <Border Grid.Row="2" Background="{DynamicResource SidebarBrush}" BorderBrush="{DynamicResource BorderSoftBrush}"
+            BorderThickness="0,1,0,0">
+      <TextBlock x:Name="StatusText" Text="Open a data folder to begin." FontSize="10" Classes="muted"
+                 Margin="20,0" VerticalAlignment="Center" />
+    </Border>
+  </Grid>
+</Window>

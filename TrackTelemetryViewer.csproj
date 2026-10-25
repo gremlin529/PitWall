@@ -7,6 +7,7 @@
     <ApplicationIcon>Assets\Pitwall.ico</ApplicationIcon>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <DefaultItemExcludes>$(DefaultItemExcludes);PitWall.Avalonia/**</DefaultItemExcludes>
   </PropertyGroup>
   <ItemGroup>
     <Content Include="Assets\XrkReader.exe"

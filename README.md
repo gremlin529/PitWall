@@ -47,3 +47,30 @@ The viewer automatically looks for a `Data` folder beside the application or pro
 - Hover over a plot to move the distance cursor across the plots and GPS map.
 
 The map is an offline GPS trace drawing, not a street-map tile view. Speed units follow the metric/imperial setting. Garmin acceleration X and Y are divided by standard gravity and displayed as longitudinal and lateral g; XRK files provide GPS-derived longitudinal and lateral g. The bundled Windows XRK reader is based on [libxrk](https://github.com/m3rlin45/libxrk). Its license and the licenses for its bundled Rust dependencies are included in `Assets/XrkReader-Third-Party-Notices.txt`. To rebuild it after changing the helper source, install the Rust stable toolchain and run `.\XrkReader\build.ps1`.
+
+## Cross-platform Avalonia version (macOS) — partial port
+
+`PitWall.Avalonia/` is a separate Avalonia 11 / .NET 10 app that runs on macOS (and, untested, Linux/Windows). The WPF app above is unchanged in behavior. **It is not feature-parity with the WPF app.** It shares `TelemetryLoader.cs` and `TelemetryModels.cs` (Garmin JSON, meanline, catalog, and XRK parsing) with the WPF project.
+
+Implemented: open a data folder (last folder remembered); Garmin and `.xrk` sessions; track → vehicle → driver → date → session → lap tree with lazy lap loading, wet sessions in blue, optimal laps in purple, fastest laps in green; WPF-style venue grouping (sessions within 5 miles merge into one venue, so an XRK session joins the nearest Garmin track name; layouts, "Layout unspecified", `SessionLayoutAssignments` and `TrackMappings` are honored); catalog vehicle names and hidden vehicles; metric/imperial speed; GPS trace map; a scrollable stack of plots for every enabled channel (speed, combined g, longitudinal g, lateral g, delta time, and any numeric XRK channel); reference lap overlay (same track only) with time delta; hover cursor across map and plots; a track overview page for track, car and driver nodes (sessions, laps counted in the background, cars, drivers, length per the units setting, meanline map when a meanline file exists, per-driver and per-car fastest and optimal lap links that select the lap in the tree); fastest lap times on session nodes and the optimal time on driver nodes.
+
+Editing (right-click in the tree, plus a Settings window): assign a layout to an unspecified-layout track; assign a catalog, custom or new car name to a vehicle (Garmin by alias in `VehicleMappings`, XRK by session in `SessionVehicleMappings`); "Edit session details…" (vehicle, driver, track/layout, condition, session type); use a session's fastest lap or any lap as the reference; Settings for units, a Channels tab (show/hide and reorder, same `ChannelVisibility`/`ChannelOrder` keys as WPF; XRK channels are hidden by default), vehicle visibility and custom names, car alias mappings and track-name renames. These use the same `viewer-settings.json` (read from the app-data copy and the data folder, written to the data folder) and `session-overrides.json` (`LocalApplicationData/TrackTelemetryViewer`) as the WPF app. Changing a Garmin session's condition also rewrites its metadata file, as in WPF. The grouping logic was checked against real data; the menus and dialogs have been build-checked but not clicked through in a GUI.
+
+The overview and channel features were verified with a headless run against real data (screenshots and tree/selection checks), not by hand in a GUI. Also ported: the WPF dark styling (forced dark theme, macOS system fonts, header bar, stat cards, rounded panels); the "LOADING TELEMETRY" overlay with WPF's begin/end counter semantics (folder scan, lap and trace loading, overview loads); background fastest-lap headers on date nodes ("Fastest m:ss.fff") and session nodes (green time, purple optimal) that update in place without rebuilding the tree; a draggable splitter between tree and data view; Settings opening on the Channels tab; and tree-state preservation (changing channels only redraws charts; edits and settings that affect tree content rebuild the tree while restoring expanded nodes and selection). The loading overlay, splitter drag, header updates and rebuild preservation were checked in a headless run against real data; real mouse feel, context menus, dialogs and the Settings Save flow were not clicked through in a GUI. Not implemented: custom window chrome, and auto-selecting the first track on load; combined-g reference lines are drawn dashed and not distinguished by axis. Vehicle and layout assignments can't be removed from the tree; clear car mappings in Settings.
+
+Build and run on macOS (needs the .NET 10 SDK and a Rust stable toolchain):
+
+```bash
+./XrkReader/build.sh                      # builds the XRK helper for aarch64-apple-darwin (pass a Rust target for others)
+dotnet run --project PitWall.Avalonia/PitWall.Avalonia.csproj
+```
+
+Publish for Apple Silicon (output includes the `XrkReader` helper and third-party notices):
+
+```bash
+./XrkReader/build.sh
+dotnet publish PitWall.Avalonia/PitWall.Avalonia.csproj -c Release -r osx-arm64 --self-contained -o PitWall.Avalonia/publish/osx-arm64
+./PitWall.Avalonia/publish/osx-arm64/PitWall
+```
+
+The output is a plain executable folder, not a signed `.app` bundle or notarized. The helper is staged in `PitWall.Avalonia/Assets/xrk/<rid>/` (git-ignored); without it the app builds with a warning and `.xrk` files fail to load. On Windows the Avalonia project reuses `Assets/XrkReader.exe`.

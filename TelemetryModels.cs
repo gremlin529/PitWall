@@ -323,8 +323,10 @@ internal sealed record SessionTrace(LapInfo Lap, IReadOnlyList<TelemetryPoint> P
 
 internal sealed record ChartValue(double DistanceM, double Value);
 
+#if !PITWALL_AVALONIA
 internal sealed record ChartLine(
     string Label,
     IReadOnlyList<ChartValue> Values,
     System.Windows.Media.Brush Color,
     bool Dashed = false);
+#endif

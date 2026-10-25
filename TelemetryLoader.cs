@@ -140,7 +140,8 @@ internal static partial class TelemetryLoader
 
     public static SessionInfo ReadAiMSessionInfo(string filePath)
     {
-        var readerPath = Path.Combine(AppContext.BaseDirectory, "XrkReader.exe");
+        var readerPath = Path.Combine(
+            AppContext.BaseDirectory, OperatingSystem.IsWindows() ? "XrkReader.exe" : "XrkReader");
         if (!File.Exists(readerPath))
         {
             throw new FileNotFoundException(
