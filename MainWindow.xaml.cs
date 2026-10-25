@@ -1161,6 +1161,14 @@ public partial class MainWindow : Window
                             Foreground = new SolidColorBrush(Color.FromRgb(151, 164, 177))
                         };
                         var dateMenu = CreateThemedContextMenu();
+                        var dateFastestItem = new MenuItem
+                        {
+                            Header = "Use fastest lap as reference",
+                            Style = (Style)FindResource("DarkMenuItemStyle"),
+                            Tag = dateInfo
+                        };
+                        dateFastestItem.Click += UseSessionFastestAsReference_Click;
+                        dateMenu.Items.Add(dateFastestItem);
                         dateMenu.Items.Add(CreateAssignVehicleMenuItem(
                             "Assign vehicle to this date's sessions",
                             [],
@@ -1842,25 +1850,43 @@ public partial class MainWindow : Window
 
     private async void UseSessionFastestAsReference_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not MenuItem { Tag: SessionInfo session })
+        if (sender is not MenuItem { Tag: var tag })
+        {
+            return;
+        }
+
+        IReadOnlyList<SessionInfo> targetSessions = tag switch
+        {
+            SessionInfo single => [single],
+            TrackDateGroup dateGroup => dateGroup.Sessions,
+            _ => []
+        };
+        if (targetSessions.Count == 0)
         {
             return;
         }
 
         try
         {
-            if (!_lapsBySession.TryGetValue(session.FilePath, out var laps))
+            var candidates = new List<LapInfo>();
+            foreach (var session in targetSessions)
             {
-                laps = await Task.Run(() => TelemetryLoader.ReadLaps(session));
-                _lapsBySession[session.FilePath] = laps;
+                if (!_lapsBySession.TryGetValue(session.FilePath, out var laps))
+                {
+                    var sessionToRead = session;
+                    laps = await Task.Run(() => TelemetryLoader.ReadLaps(sessionToRead));
+                    _lapsBySession[session.FilePath] = laps;
+                }
+
+                candidates.AddRange(laps);
             }
 
-            var fastestLap = laps
+            var fastestLap = candidates
                 .Where(lap => !lap.IsAverage && double.IsFinite(lap.DurationMs) && lap.DurationMs > 0)
                 .MinBy(lap => lap.DurationMs);
             if (fastestLap is null)
             {
-                MessageBox.Show(this, "No fastest driven lap was found in this session.",
+                MessageBox.Show(this, "No fastest driven lap was found.",
                     "Reference lap unavailable", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
