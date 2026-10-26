@@ -80,12 +80,14 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        ShowAppVersion();
         LoadSessionEdits();
         RebuildTelemetryCharts();
     }
 
     private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
+        _ = CheckForUpdateAsync();
         var defaultFolder = FindDefaultDataFolder();
         if (defaultFolder is null)
         {
@@ -691,6 +693,8 @@ public partial class MainWindow : Window
         var treeGeneration = ++_treeGeneration;
         StatusText.Text = "Scanning session files…";
         UpdateLoadingDetail("Finding telemetry files…");
+        var packageImport = await Task.Run(() => ExtractPackages(folder, _pendingPackages.ToArray()));
+        _pendingPackages.Clear();
         var performanceFiles = TelemetryLoader.EnumerateFilesRecursively(folder, "autosport-performance-*.json");
         var aimFiles = TelemetryLoader.EnumerateFilesRecursively(folder, "*.xrk");
         var files = performanceFiles.Concat(aimFiles)
@@ -732,6 +736,8 @@ public partial class MainWindow : Window
         _sessions.AddRange(loaded.OrderBy(session => session.LocalStart));
         _dataFolder = folder;
         LoadViewerSettings(folder);
+        ApplyImportedCorrections(packageImport);
+        ReportImport(packageImport);
         try
         {
             _vehicleCatalog = TelemetryLoader.ReadVehicleCatalog(folder);
@@ -1175,6 +1181,7 @@ public partial class MainWindow : Window
                             dateSessions.Select(session => session.SessionGuid)
                                 .Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
                             dateSessions));
+                        dateMenu.Items.Add(CreateExportMenuItem(dateSessions.ToArray(), dateInfo.Date.ToString("yyyy-MM-dd")));
                         dateNode.ContextMenu = dateMenu;
 
                         foreach (var session in dateSessions)
@@ -1845,6 +1852,7 @@ public partial class MainWindow : Window
         menu.Items.Add(item);
         menu.Items.Add(CreateAssignVehicleMenuItem(
             "Assign vehicle to this session", [], [session.SessionGuid], [session]));
+        menu.Items.Add(CreateExportMenuItem([session], session.LocalStart.ToString("yyyy-MM-dd HH.mm")));
         return menu;
     }
 

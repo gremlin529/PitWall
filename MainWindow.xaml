@@ -158,16 +158,21 @@
                                   Fill="#F2F5F7"/>
                         </Canvas>
                     </Viewbox>
-                    <TextBlock Text="PITWALL" FontSize="14" FontWeight="Bold"
+                    <TextBlock Text="Pit Wall" FontSize="14" FontWeight="Bold"
                                VerticalAlignment="Center"/>
-                    <TextBlock Text="  /  TELEMETRY" Foreground="{StaticResource MutedBrush}"
-                               FontSize="11" VerticalAlignment="Center" Margin="2,1,0,0"/>
+                    <TextBlock x:Name="VersionText" Foreground="{StaticResource MutedBrush}"
+                               FontSize="11" VerticalAlignment="Center" Margin="8,1,0,0"/>
+                    <Button x:Name="UpdateButton" Content="Update available" Click="Update_Click"
+                            Visibility="Collapsed" Margin="14,0,0,0" Padding="10,3" FontSize="11"
+                            Background="#1F4D36" BorderBrush="#2F7A54"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
                     <TextBlock x:Name="SessionCountText" Text="No sessions loaded"
                                Foreground="{StaticResource MutedBrush}" FontSize="11"
                                VerticalAlignment="Center" Margin="0,0,14,0"/>
                     <Button Content="Open data folder" Click="OpenFolder_Click"/>
+                    <Button Content="Import…" Click="Import_Click" Margin="8,0,0,0"
+                            ToolTip="Import PitWall packages into the data folder"/>
                     <Button Content="⚙" Click="Settings_Click" ToolTip="Settings"
                             FontSize="17" Padding="9,3" Margin="8,0,0,0"
                             AutomationProperties.Name="Settings"/>

@@ -138,6 +138,11 @@ internal static partial class TelemetryLoader
             ReadOptionalDouble(LapStartTimeRegex(), optimalLapText));
     }
 
+    public static string ComputeAiMSessionId(string filePath) =>
+        Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(filePath).ToUpperInvariant())))
+            .ToLowerInvariant();
+
     public static SessionInfo ReadAiMSessionInfo(string filePath)
     {
         var readerPath = Path.Combine(
@@ -208,9 +213,7 @@ internal static partial class TelemetryLoader
             laps = [CreateAiMFallbackLap(samples, channels)];
         }
 
-        var sessionId = Convert.ToHexString(
-                SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(filePath).ToUpperInvariant())))
-            .ToLowerInvariant();
+        var sessionId = ComputeAiMSessionId(filePath);
         var localStart = ReadAiMStartTime(root, filePath);
         var locationLatitude = samples.Average(sample => sample.Latitude);
         var locationLongitude = samples.Average(sample => sample.Longitude);

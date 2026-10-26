@@ -45,6 +45,8 @@ The viewer automatically looks for a `Data` folder beside the application or pro
 - Right-click a lap and choose **Use as reference lap** to compare it with the selected lap. The GPS traces and speed/acceleration plots are overlaid; the delta is session A elapsed time minus reference elapsed time at the same distance.
 - Right-click a session to use its fastest driven lap as the reference; the lap cards identify the selected fastest or optimal lap and its date/time.
 - Hover over a plot to move the distance cursor across the plots and GPS map.
+- Right-click a date or session and choose **Export…** to write either a `.pitwall` package (a zip with the session files plus a `manifest.json` sidecar holding the corrected driver, vehicle, track layout and condition) or AiM `.xrk` files (one per session; Garmin sessions are converted best-effort from GPS, speed, G-force and laps).
+- **Import…** (top bar) unpacks `.pitwall` packages into `<data folder>\<driver>\<track>\data` and applies their corrections. `.pitwall` files placed anywhere in the data folder are unpacked automatically on load; sessions already present are skipped.
 
 The map is an offline GPS trace drawing, not a street-map tile view. Speed units follow the metric/imperial setting. Garmin acceleration X and Y are divided by standard gravity and displayed as longitudinal and lateral g; XRK files provide GPS-derived longitudinal and lateral g. The bundled Windows XRK reader is based on [libxrk](https://github.com/m3rlin45/libxrk). Its license and the licenses for its bundled Rust dependencies are included in `Assets/XrkReader-Third-Party-Notices.txt`. To rebuild it after changing the helper source, install the Rust stable toolchain and run `.\XrkReader\build.ps1`.
 
