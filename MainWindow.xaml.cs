@@ -1264,12 +1264,53 @@ public partial class MainWindow : Window
                 }
 
                 break;
+            case TrackDateGroup dateGroup:
+                await SelectDateFastestLapAsync(dateGroup, selectedNode);
+                break;
             case SessionInfo session:
                 await SelectSessionAsync(session, selectedNode);
                 break;
             case LapInfo lap:
                 await SelectLapAsync(lap);
                 break;
+        }
+    }
+
+    private async Task SelectDateFastestLapAsync(TrackDateGroup dateGroup, TreeViewItem dateNode)
+    {
+        try
+        {
+            var candidates = new List<LapInfo>();
+            foreach (var session in dateGroup.Sessions)
+            {
+                if (!_lapsBySession.TryGetValue(session.FilePath, out var laps))
+                {
+                    var sessionToRead = session;
+                    laps = await Task.Run(() => TelemetryLoader.ReadLaps(sessionToRead));
+                    _lapsBySession[session.FilePath] = laps;
+                }
+
+                candidates.AddRange(laps);
+            }
+
+            if (!dateNode.IsSelected)
+            {
+                return;
+            }
+
+            var fastestLap = candidates
+                .Where(lap => !lap.IsAverage && double.IsFinite(lap.DurationMs) && lap.DurationMs > 0)
+                .MinBy(lap => lap.DurationMs);
+            if (fastestLap is not null)
+            {
+                await SelectLapAsync(fastestLap);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                           JsonException or InvalidDataException or ArgumentException)
+        {
+            MessageBox.Show(this, exception.Message, "Laps could not be loaded",
+                MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 
