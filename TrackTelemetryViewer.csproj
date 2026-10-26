@@ -11,6 +11,7 @@
     <DefaultItemExcludes>$(DefaultItemExcludes);PitWall.Avalonia/**</DefaultItemExcludes>
   </PropertyGroup>
   <ItemGroup>
+    <Resource Include="Assets\PitwallLogo.png" />
     <Content Include="Assets\XrkReader.exe"
              TargetPath="XrkReader.exe"
              CopyToOutputDirectory="PreserveNewest"
