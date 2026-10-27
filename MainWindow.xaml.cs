@@ -4,6 +4,7 @@ using System.IO;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using Microsoft.Win32;
 
@@ -68,6 +69,8 @@ public partial class MainWindow : Window
     private LapInfo? _referenceLap;
     private SessionTrace? _primaryTrace;
     private SessionTrace? _referenceTrace;
+    private TrackSegmentMap? _segmentMap;
+    private readonly Dictionary<string, TrackSegmentMap?> _segmentCache = new(StringComparer.OrdinalIgnoreCase);
     private int _loadGeneration;
     private int _overviewGeneration;
     private int _treeGeneration;
@@ -77,12 +80,73 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        ShowAppVersion();
         LoadSessionEdits();
         RebuildTelemetryCharts();
+        RestoreWindowPlacement();
+        Closing += (_, _) => SaveWindowPlacement();
+    }
+
+    private sealed record WindowPlacement(double Left, double Top, double Width, double Height, bool Maximized);
+
+    private string WindowPlacementPath => Path.Combine(
+        Path.GetDirectoryName(_localViewerSettingsPath)!, "window-placement.json");
+
+    private void RestoreWindowPlacement()
+    {
+        try
+        {
+            if (!File.Exists(WindowPlacementPath) ||
+                JsonSerializer.Deserialize<WindowPlacement>(File.ReadAllText(WindowPlacementPath)) is not { } placement ||
+                !new[] { placement.Left, placement.Top, placement.Width, placement.Height }.All(double.IsFinite) ||
+                placement.Width < MinWidth || placement.Height < MinHeight)
+            {
+                return;
+            }
+
+            var bounds = new Rect(placement.Left, placement.Top, placement.Width, placement.Height);
+            var virtualScreen = new Rect(SystemParameters.VirtualScreenLeft, SystemParameters.VirtualScreenTop,
+                SystemParameters.VirtualScreenWidth, SystemParameters.VirtualScreenHeight);
+            var visible = Rect.Intersect(bounds, virtualScreen);
+            if (visible.IsEmpty || visible.Width < 100 || visible.Height < 60)
+            {
+                return;
+            }
+
+            WindowStartupLocation = WindowStartupLocation.Manual;
+            Left = bounds.Left;
+            Top = bounds.Top;
+            Width = bounds.Width;
+            Height = bounds.Height;
+            if (placement.Maximized)
+            {
+                WindowState = WindowState.Maximized;
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+        }
+    }
+
+    private void SaveWindowPlacement()
+    {
+        try
+        {
+            var bounds = WindowState == WindowState.Normal
+                ? new Rect(Left, Top, Width, Height)
+                : RestoreBounds;
+            Directory.CreateDirectory(Path.GetDirectoryName(WindowPlacementPath)!);
+            File.WriteAllText(WindowPlacementPath, JsonSerializer.Serialize(new WindowPlacement(
+                bounds.Left, bounds.Top, bounds.Width, bounds.Height, WindowState == WindowState.Maximized)));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+        }
     }
 
     private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
+        _ = CheckForUpdateAsync();
         var defaultFolder = FindDefaultDataFolder();
         if (defaultFolder is null)
         {
@@ -425,8 +489,10 @@ public partial class MainWindow : Window
             .Distinct(StringComparer.CurrentCultureIgnoreCase)
             .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase)
             .ToArray();
-        VehicleNameCombo.ItemsSource = names;
+        _vehicleChoices = names;
     }
+
+    private IReadOnlyList<string> _vehicleChoices = [];
 
     private bool UseImperialDistance =>
         _viewerSettings.DistanceUnits.Equals("Imperial", StringComparison.OrdinalIgnoreCase);
@@ -688,9 +754,12 @@ public partial class MainWindow : Window
         var treeGeneration = ++_treeGeneration;
         StatusText.Text = "Scanning session files…";
         UpdateLoadingDetail("Finding telemetry files…");
+        var packageImport = await Task.Run(() => ExtractPackages(folder, _pendingPackages.ToArray()));
+        _pendingPackages.Clear();
         var performanceFiles = TelemetryLoader.EnumerateFilesRecursively(folder, "autosport-performance-*.json");
         var aimFiles = TelemetryLoader.EnumerateFilesRecursively(folder, "*.xrk");
-        var files = performanceFiles.Concat(aimFiles)
+        var csvFiles = TelemetryLoader.EnumerateAimCsvFiles(folder);
+        var files = performanceFiles.Concat(aimFiles).Concat(csvFiles)
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         if (files.Length == 0)
@@ -712,9 +781,12 @@ public partial class MainWindow : Window
                 Dispatcher.Invoke(() => UpdateLoadingDetail($"Reading {Path.GetFileName(file)}"));
                 try
                 {
-                    loaded.Add(Path.GetExtension(file).Equals(".xrk", StringComparison.OrdinalIgnoreCase)
+                    var extension = Path.GetExtension(file);
+                    loaded.Add(extension.Equals(".xrk", StringComparison.OrdinalIgnoreCase)
                         ? TelemetryLoader.ReadAiMSessionInfo(file)
-                        : TelemetryLoader.ReadSessionInfo(file, dataFileIndex));
+                        : extension.Equals(".csv", StringComparison.OrdinalIgnoreCase)
+                            ? TelemetryLoader.ReadAimCsvSessionInfo(file, GetCsvShiftSeconds)
+                            : TelemetryLoader.ReadSessionInfo(file, dataFileIndex));
                 }
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
                                                    InvalidDataException or ArgumentOutOfRangeException or
@@ -726,9 +798,12 @@ public partial class MainWindow : Window
         });
 
         _sessions.Clear();
+        _csvOriginals.Clear();
         _sessions.AddRange(loaded.OrderBy(session => session.LocalStart));
         _dataFolder = folder;
         LoadViewerSettings(folder);
+        ApplyImportedCorrections(packageImport);
+        ReportImport(packageImport);
         try
         {
             _vehicleCatalog = TelemetryLoader.ReadVehicleCatalog(folder);
@@ -737,7 +812,7 @@ public partial class MainWindow : Window
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
                                            JsonException or InvalidDataException)
         {
-            VehicleNameCombo.ItemsSource = Array.Empty<string>();
+            _vehicleChoices = [];
             _vehicleCatalog = new VehicleCatalog([], []);
             MessageBox.Show(this, exception.Message, "Vehicle catalog could not be loaded",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -767,8 +842,9 @@ public partial class MainWindow : Window
 
         RebuildTelemetryCharts();
         _meanlineCache.Clear();
-        _trackStatsTasks.Clear();
-        _referenceLap = null;
+        _segmentCache.Clear();
+        _segmentMap = null;
+        _trackStatsTasks.Clear();        _referenceLap = null;
         _referenceTrace = null;
         BuildTrackLocations();
         DataFolderText.Text = folder;
@@ -809,6 +885,7 @@ public partial class MainWindow : Window
     {
         _locations.Clear();
         _trackBySession.Clear();
+        ApplyCsvTrackAssignments();
 
         var sessions = _sessions.OrderBy(session => session.Latitude)
             .ThenBy(session => session.Longitude)
@@ -1078,7 +1155,7 @@ public partial class MainWindow : Window
                 IsExpanded = false,
                 FontWeight = FontWeights.SemiBold
             };
-            var layoutContextMenu = CreateLayoutContextMenu(location);
+            var layoutContextMenu = AddCsvTrackMenu(location, CreateLayoutContextMenu(location));
             if (layoutContextMenu is not null)
             {
                 locationNode.ContextMenu = layoutContextMenu;
@@ -1150,13 +1227,29 @@ public partial class MainWindow : Window
                         var dateInfo = new TrackDateGroup(dateGroup.Key, dateSessions);
                         var dateNode = new TreeViewItem
                         {
-                            Header = CreateDateHeader(dateInfo),
+                            Header = CreateDateHeader(dateInfo, driverSessions),
                             Tag = dateInfo,
                             IsExpanded = false,
                             FontWeight = FontWeights.Normal,
                             Foreground = new SolidColorBrush(Color.FromRgb(151, 164, 177))
                         };
-                        ContextMenuService.SetIsEnabled(dateNode, false);
+                        var dateMenu = CreateThemedContextMenu();
+                        var dateFastestItem = new MenuItem
+                        {
+                            Header = "Use fastest lap as reference",
+                            Style = (Style)FindResource("DarkMenuItemStyle"),
+                            Tag = dateInfo
+                        };
+                        dateFastestItem.Click += UseSessionFastestAsReference_Click;
+                        dateMenu.Items.Add(dateFastestItem);
+                        dateMenu.Items.Add(CreateAssignVehicleMenuItem(
+                            "Assign vehicle to this date's sessions",
+                            [],
+                            dateSessions.Select(session => session.SessionGuid)
+                                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+                            dateSessions));
+                        dateMenu.Items.Add(CreateExportMenuItem(dateSessions.ToArray(), dateInfo.Date.ToString("yyyy-MM-dd")));
+                        dateNode.ContextMenu = dateMenu;
 
                         foreach (var session in dateSessions)
                         {
@@ -1166,7 +1259,8 @@ public partial class MainWindow : Window
                                     session,
                                     _fastestLapTimesBySession.TryGetValue(session.FilePath, out var fastestDuration)
                                         ? fastestDuration
-                                        : null),
+                                        : null,
+                                    IsFastestSessionOfDate(session, dateSessions)),
                                 Tag = session,
                                 FontWeight = FontWeights.Normal
                             };
@@ -1214,13 +1308,11 @@ public partial class MainWindow : Window
                 _selectedLocation = location;
                 _selectedSession = null;
                 _primaryLap = null;
-                SessionDetailsPanel.Visibility = Visibility.Collapsed;
                 await ShowTrackOverviewAsync(location, null);
                 break;
             case TrackCarGroup car:
                 _selectedSession = null;
                 _primaryLap = null;
-                SessionDetailsPanel.Visibility = Visibility.Collapsed;
                 await ShowTrackOverviewAsync(_trackBySession[car.Sessions[0].FilePath], car.Sessions, car.Name);
                 break;
             case TrackDriverGroup driver:
@@ -1232,11 +1324,13 @@ public partial class MainWindow : Window
                 {
                     _selectedSession = null;
                     _primaryLap = null;
-                    SessionDetailsPanel.Visibility = Visibility.Collapsed;
                     await ShowTrackOverviewAsync(
                         _trackBySession[driver.Sessions[0].FilePath], driver.Sessions, driver.Name);
                 }
 
+                break;
+            case TrackDateGroup dateGroup:
+                await SelectDateFastestLapAsync(dateGroup, selectedNode);
                 break;
             case SessionInfo session:
                 await SelectSessionAsync(session, selectedNode);
@@ -1247,19 +1341,51 @@ public partial class MainWindow : Window
         }
     }
 
+    private async Task SelectDateFastestLapAsync(TrackDateGroup dateGroup, TreeViewItem dateNode)
+    {
+        try
+        {
+            var candidates = new List<LapInfo>();
+            foreach (var session in dateGroup.Sessions)
+            {
+                if (!_lapsBySession.TryGetValue(session.FilePath, out var laps))
+                {
+                    var sessionToRead = session;
+                    laps = await Task.Run(() => TelemetryLoader.ReadLaps(sessionToRead));
+                    _lapsBySession[session.FilePath] = laps;
+                }
+
+                candidates.AddRange(laps);
+            }
+
+            if (!dateNode.IsSelected)
+            {
+                return;
+            }
+
+            var fastestLap = candidates
+                .Where(lap => !lap.IsAverage && double.IsFinite(lap.DurationMs) && lap.DurationMs > 0)
+                .MinBy(lap => lap.DurationMs);
+            if (fastestLap is not null)
+            {
+                await SelectLapAsync(fastestLap);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                           JsonException or InvalidDataException or ArgumentException)
+        {
+            MessageBox.Show(this, exception.Message, "Laps could not be loaded",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     private async Task SelectSessionAsync(SessionInfo session, TreeViewItem sessionNode)
     {
         _selectedSession = session;
         _selectedLocation = _trackBySession[session.FilePath];
         DataViewPanel.Visibility = Visibility.Visible;
         TrackOverviewPanel.Visibility = Visibility.Collapsed;
-        SessionDetailsPanel.Visibility = Visibility.Visible;
         TrackTitleText.Text = _selectedLocation.DisplayName;
-        SessionSubtitleText.Text =
-            $"{session.LocalStart:dddd, MMMM d, yyyy  ·  h:mm:ss tt}  ·  {GetDriverName(session)}  ·  " +
-            $"{GetVehicleName(session)}  ·  " +
-            $"{GetSessionEdits(session).TrackCondition} · {GetSessionEdits(session).RaceType}";
-        PopulateSessionEditor(session);
 
         if (_referenceLap is not null &&
             (!_trackBySession.TryGetValue(_referenceLap.Session.FilePath, out var referenceTrack) ||
@@ -1353,7 +1479,6 @@ public partial class MainWindow : Window
                     lap == fastestLap ? Brushes.LimeGreen : null));
             }
 
-            sessionNode.Header = FormatSessionHeader(session, fastestLap?.DurationMs);
         }
 
         return laps;
@@ -1376,21 +1501,92 @@ public partial class MainWindow : Window
         return node;
     }
 
-    private string FormatSessionHeader(SessionInfo session, double? fastestLapDurationMs)
+    private object FormatSessionHeader(
+        SessionInfo session,
+        double? fastestLapDurationMs,
+        bool isFastestSessionOfDate)
     {
-        var header =
-            $"{session.SessionLabel}   ·   {TimeSpan.FromSeconds(session.SessionDurationSeconds):h\\:mm\\:ss}";
+        var header = new StackPanel { Orientation = Orientation.Horizontal };
+        header.Children.Add(new TextBlock
+        {
+            Text = $"{session.SessionLabel}   ·   {TimeSpan.FromSeconds(session.SessionDurationSeconds):h\\:mm\\:ss}"
+        });
         if (fastestLapDurationMs is not null)
         {
-            header = $"{header}  ({FormatLapTime(fastestLapDurationMs.Value / 1000d)})";
+            var fastest = new TextBlock
+            {
+                Text = $"  ({FormatLapTime(fastestLapDurationMs.Value / 1000d)})",
+                Cursor = Cursors.Hand,
+                ToolTip = "Load the fastest lap"
+            };
+            if (isFastestSessionOfDate)
+            {
+                fastest.Foreground = Brushes.LimeGreen;
+            }
+
+            fastest.MouseLeftButtonDown += SessionFastestLap_MouseLeftButtonDown;
+            header.Children.Add(fastest);
         }
 
-        return IsWetSession(session)
-            ? $"{header}  (wet)"
-            : header;
+        if (IsWetSession(session))
+        {
+            header.Children.Add(new TextBlock { Text = "  (wet)" });
+        }
+
+        return header;
     }
 
-    private object CreateDateHeader(TrackDateGroup dateGroup)
+    private async void SessionFastestLap_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        DependencyObject? parent = sender as DependencyObject;
+        while (parent is not null and not TreeViewItem)
+        {
+            parent = VisualTreeHelper.GetParent(parent);
+        }
+
+        if (parent is not TreeViewItem { Tag: SessionInfo session } sessionNode)
+        {
+            return;
+        }
+
+        var laps = await PopulateLapNodesAsync(session, sessionNode);
+        var fastestLap = laps?
+            .Where(lap => !lap.IsAverage && double.IsFinite(lap.DurationMs) && lap.DurationMs > 0)
+            .MinBy(lap => lap.DurationMs);
+        var fastestNode = sessionNode.Items.OfType<TreeViewItem>()
+            .FirstOrDefault(node => node.Tag is LapInfo lap && lap == fastestLap);
+        if (fastestNode is null)
+        {
+            return;
+        }
+
+        if (fastestNode.IsSelected)
+        {
+            await SelectLapAsync((LapInfo)fastestNode.Tag);
+        }
+        else
+        {
+            fastestNode.IsSelected = true;
+        }
+    }
+
+    private double GetFastestDuration(IEnumerable<SessionInfo> sessions) => sessions
+        .Where(session => _fastestLapTimesBySession.ContainsKey(session.FilePath))
+        .Select(session => _fastestLapTimesBySession[session.FilePath])
+        .DefaultIfEmpty(double.PositiveInfinity)
+        .Min();
+
+    private bool IsFastestSessionOfDate(SessionInfo session, IEnumerable<SessionInfo> dateSessions)
+    {
+        var fastestSession = dateSessions
+            .Where(candidate => _fastestLapTimesBySession.ContainsKey(candidate.FilePath))
+            .MinBy(candidate => _fastestLapTimesBySession[candidate.FilePath]);
+        return fastestSession is not null &&
+               fastestSession.FilePath.Equals(session.FilePath, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private object CreateDateHeader(TrackDateGroup dateGroup, IReadOnlyList<SessionInfo> driverSessions)
     {
         var header = new StackPanel
         {
@@ -1403,20 +1599,22 @@ public partial class MainWindow : Window
             VerticalAlignment = VerticalAlignment.Center
         });
 
-        var fastestDuration = dateGroup.Sessions
-            .Where(session => _fastestLapTimesBySession.ContainsKey(session.FilePath))
-            .Select(session => _fastestLapTimesBySession[session.FilePath])
-            .DefaultIfEmpty(double.PositiveInfinity)
-            .Min();
+        var fastestDuration = GetFastestDuration(dateGroup.Sessions);
         if (double.IsFinite(fastestDuration))
         {
-            header.Children.Add(new TextBlock
+            var isOverallFastest = fastestDuration <= GetFastestDuration(driverSessions);
+            var text = new TextBlock
             {
                 Text = $"  ·  Fastest {FormatLapTime(fastestDuration / 1000d)}",
-                Foreground = Brushes.LimeGreen,
                 Margin = new Thickness(6, 0, 0, 0),
                 VerticalAlignment = VerticalAlignment.Center
-            });
+            };
+            if (isOverallFastest)
+            {
+                text.Foreground = Brushes.LimeGreen;
+            }
+
+            header.Children.Add(text);
         }
 
         return header;
@@ -1427,16 +1625,33 @@ public partial class MainWindow : Window
         foreach (var trackNode in SessionTree.Items.OfType<TreeViewItem>())
         foreach (var carNode in trackNode.Items.OfType<TreeViewItem>())
         foreach (var driverNode in carNode.Items.OfType<TreeViewItem>()
-                     .Where(node => node.Tag is TrackDriverGroup))
-        foreach (var dateNode in driverNode.Items.OfType<TreeViewItem>()
-                     .Where(node => node.Tag is TrackDateGroup dateGroup &&
-                                    dateGroup.Sessions.Any(candidate =>
+                     .Where(node => node.Tag is TrackDriverGroup driver &&
+                                    driver.Sessions.Any(candidate =>
                                         candidate.FilePath.Equals(
                                             session.FilePath, StringComparison.OrdinalIgnoreCase))))
         {
-            if (dateNode.Tag is TrackDateGroup dateGroup)
+            if (driverNode.Tag is not TrackDriverGroup driverGroup)
             {
-                dateNode.Header = CreateDateHeader(dateGroup);
+                continue;
+            }
+
+            foreach (var dateNode in driverNode.Items.OfType<TreeViewItem>())
+            {
+                if (dateNode.Tag is TrackDateGroup dateGroup)
+                {
+                    dateNode.Header = CreateDateHeader(dateGroup, driverGroup.Sessions);
+                    foreach (var sessionNode in dateNode.Items.OfType<TreeViewItem>()
+                                 .Where(node => node.Tag is SessionInfo))
+                    {
+                        var dateSession = (SessionInfo)sessionNode.Tag;
+                        var hasDuration = _fastestLapTimesBySession.TryGetValue(
+                            dateSession.FilePath, out var duration);
+                        sessionNode.Header = FormatSessionHeader(
+                            dateSession,
+                            hasDuration ? duration : null,
+                            IsFastestSessionOfDate(dateSession, dateGroup.Sessions));
+                    }
+                }
             }
         }
     }
@@ -1447,13 +1662,6 @@ public partial class MainWindow : Window
     private ContextMenu CreateVehicleContextMenu(TrackCarGroup car)
     {
         var menu = CreateThemedContextMenu();
-        var itemStyle = (Style)FindResource("DarkMenuItemStyle");
-        var assignMenu = new MenuItem
-        {
-            Header = "Assign vehicle name",
-            Style = itemStyle,
-            ItemContainerStyle = itemStyle
-        };
         var aliases = car.Sessions.Select(session => session.VehicleAlias)
             .Where(alias => !string.IsNullOrWhiteSpace(alias))
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -1463,6 +1671,24 @@ public partial class MainWindow : Window
             .Select(session => session.SessionGuid)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
+        menu.Items.Add(CreateAssignVehicleMenuItem(
+            "Assign vehicle name", aliases, sessionGuids, car.Sessions));
+        return menu;
+    }
+
+    private MenuItem CreateAssignVehicleMenuItem(
+        string header,
+        string[] aliases,
+        string[] sessionGuids,
+        IReadOnlyList<SessionInfo> sessions)
+    {
+        var itemStyle = (Style)FindResource("DarkMenuItemStyle");
+        var assignMenu = new MenuItem
+        {
+            Header = header,
+            Style = itemStyle,
+            ItemContainerStyle = itemStyle
+        };
         foreach (var vehicleName in _vehicleCatalog.Names
                      .Concat(_customVehicleNames)
                      .Where(name => !IsVehicleHidden(name))
@@ -1473,7 +1699,7 @@ public partial class MainWindow : Window
             {
                 Header = vehicleName,
                 Style = itemStyle,
-                Tag = new VehicleAssignment(aliases, sessionGuids, vehicleName, car.Sessions),
+                Tag = new VehicleAssignment(aliases, sessionGuids, vehicleName, sessions),
                 IsEnabled = aliases.Length > 0 || sessionGuids.Length > 0
             };
             item.Click += AssignVehicleName_Click;
@@ -1490,8 +1716,7 @@ public partial class MainWindow : Window
             });
         }
 
-        menu.Items.Add(assignMenu);
-        return menu;
+        return assignMenu;
     }
 
     private ContextMenu CreateThemedContextMenu()
@@ -1523,6 +1748,13 @@ public partial class MainWindow : Window
         foreach (var sessionGuid in assignment.SessionGuids)
         {
             updatedSessionMappings[sessionGuid] = assignment.VehicleName;
+        }
+
+        // A car-level assignment applies through the alias, so drop per-session overrides it would hide.
+        foreach (var session in assignment.Sessions.Where(session => assignment.Aliases.Count > 0 &&
+                     !string.IsNullOrWhiteSpace(session.VehicleAlias)))
+        {
+            updatedSessionMappings.Remove(session.SessionGuid);
         }
 
         var updatedSettings = new ViewerSettings
@@ -1610,13 +1842,12 @@ public partial class MainWindow : Window
             if (result.DurationMs is double durationMs)
             {
                 _fastestLapTimesBySession[result.Session.FilePath] = durationMs;
-                UpdateDateNodeHeaders(result.Session);
             }
 
+            UpdateDateNodeHeaders(result.Session);
             var node = FindSessionNode(result.Session);
             if (node is not null)
             {
-                node.Header = FormatSessionHeader(result.Session, result.DurationMs);
                 if (IsWetSession(result.Session))
                 {
                     node.Foreground = Brushes.DeepSkyBlue;
@@ -1758,30 +1989,58 @@ public partial class MainWindow : Window
         };
         item.Click += UseSessionFastestAsReference_Click;
         menu.Items.Add(item);
+        var detailsItem = new MenuItem
+        {
+            Header = "Session details…",
+            Style = (Style)FindResource("DarkMenuItemStyle")
+        };
+        detailsItem.Click += (_, _) => ShowSessionDetailsDialog(session);
+        menu.Items.Add(detailsItem);
+        menu.Items.Add(CreateAssignVehicleMenuItem(
+            "Assign vehicle to this session", [], [session.SessionGuid], [session]));
+        menu.Items.Add(CreateExportMenuItem([session], session.LocalStart.ToString("yyyy-MM-dd HH.mm")));
         return menu;
     }
 
     private async void UseSessionFastestAsReference_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not MenuItem { Tag: SessionInfo session })
+        if (sender is not MenuItem { Tag: var tag })
+        {
+            return;
+        }
+
+        IReadOnlyList<SessionInfo> targetSessions = tag switch
+        {
+            SessionInfo single => [single],
+            TrackDateGroup dateGroup => dateGroup.Sessions,
+            _ => []
+        };
+        if (targetSessions.Count == 0)
         {
             return;
         }
 
         try
         {
-            if (!_lapsBySession.TryGetValue(session.FilePath, out var laps))
+            var candidates = new List<LapInfo>();
+            foreach (var session in targetSessions)
             {
-                laps = await Task.Run(() => TelemetryLoader.ReadLaps(session));
-                _lapsBySession[session.FilePath] = laps;
+                if (!_lapsBySession.TryGetValue(session.FilePath, out var laps))
+                {
+                    var sessionToRead = session;
+                    laps = await Task.Run(() => TelemetryLoader.ReadLaps(sessionToRead));
+                    _lapsBySession[session.FilePath] = laps;
+                }
+
+                candidates.AddRange(laps);
             }
 
-            var fastestLap = laps
+            var fastestLap = candidates
                 .Where(lap => !lap.IsAverage && double.IsFinite(lap.DurationMs) && lap.DurationMs > 0)
                 .MinBy(lap => lap.DurationMs);
             if (fastestLap is null)
             {
-                MessageBox.Show(this, "No fastest driven lap was found in this session.",
+                MessageBox.Show(this, "No fastest driven lap was found.",
                     "Reference lap unavailable", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
@@ -1844,13 +2103,7 @@ public partial class MainWindow : Window
         _selectedLocation = _trackBySession[lap.Session.FilePath];
         DataViewPanel.Visibility = Visibility.Visible;
         TrackOverviewPanel.Visibility = Visibility.Collapsed;
-        SessionDetailsPanel.Visibility = Visibility.Visible;
         TrackTitleText.Text = _selectedLocation.DisplayName;
-        SessionSubtitleText.Text =
-            $"{lap.Session.LocalStart:dddd, MMMM d, yyyy}  ·  {lap.Session.SessionLabel}  ·  " +
-            $"{GetDriverName(lap.Session)}  ·  {lap.Label}  ·  " +
-            $"{GetVehicleName(lap.Session)}  ·  {GetSessionEdits(lap.Session).TrackCondition}";
-        PopulateSessionEditor(lap.Session);
 
         if (_referenceLap is not null &&
             (!_trackBySession.TryGetValue(_referenceLap.Session.FilePath, out var referenceTrack) ||
@@ -1892,6 +2145,12 @@ public partial class MainWindow : Window
 
             _primaryTrace = primaryTask.Result;
             _referenceTrace = referenceTask.Result;
+            _segmentMap = await LoadSegmentMapAsync(GetMeanlinePath(primary.Session));
+            if (generation != _loadGeneration)
+            {
+                return;
+            }
+
             _cursorDistanceM = 0;
             UpdateCharts();
             UpdateStatistics();
@@ -1921,6 +2180,36 @@ public partial class MainWindow : Window
         }
     }
 
+    private string? GetMeanlinePath(SessionInfo session) =>
+        session.MeanlinePath ??
+        (_trackBySession.TryGetValue(session.FilePath, out var location) ? location.MeanlinePath : null);
+
+    private async Task<TrackSegmentMap?> LoadSegmentMapAsync(string? meanlinePath)
+    {
+        if (meanlinePath is null)
+        {
+            return null;
+        }
+
+        if (_segmentCache.TryGetValue(meanlinePath, out var cached))
+        {
+            return cached;
+        }
+
+        TrackSegmentMap? segments;
+        try
+        {
+            segments = await Task.Run(() => TelemetryLoader.ReadMeanlineSegments(meanlinePath));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+            segments = null;
+        }
+
+        _segmentCache[meanlinePath] = segments;
+        return segments;
+    }
+
     private void UpdateCharts()
     {
         if (_primaryTrace is null)
@@ -1928,8 +2217,10 @@ public partial class MainWindow : Window
             foreach (var chart in _chartElements.Values)
             {
                 chart.Lines = [];
+                chart.SegmentBoundariesM = [];
             }
 
+            TrackMapView.SegmentMap = null;
             TrackMapView.Traces = [];
             return;
         }
@@ -1941,14 +2232,20 @@ public partial class MainWindow : Window
         }
 
         var maxDistance = _primaryTrace.DistanceM;
+        var scaledSegments = _segmentMap is not null && maxDistance > 0
+            ? _segmentMap.ScaledTo(maxDistance)
+            : null;
+        TrackMapView.SegmentMap = scaledSegments;
+        TrackMapView.Traces = traces;
         foreach (var channel in BuildChartChannelSettings())
         {
             var chart = GetOrCreateChart(channel);
             chart.MaxDistanceM = maxDistance;
+            chart.SegmentBoundariesM = scaledSegments?.BoundariesM ?? [];
             chart.Lines = channel.Key switch
             {
                 "speed" => traces.Select((trace, index) => new ChartLine(
-                    index == 0 ? "A" : "B",
+                    index == 0 ? "Session" : "Reference",
                     trace.Points.Select(point => new ChartValue(
                         point.DistanceM,
                         point.SpeedMps * (UseImperialDistance ? 2.236936292 : 3.6))).ToArray(),
@@ -1973,7 +2270,6 @@ public partial class MainWindow : Window
             };
         }
 
-        TrackMapView.Traces = traces;
         SetCursorDistance(_cursorDistanceM);
         UpdateReferenceHeader();
     }
@@ -1983,13 +2279,14 @@ public partial class MainWindow : Window
         var lines = new List<ChartLine>();
         foreach (var (trace, index) in traces.Select((trace, index) => (trace, index)))
         {
-            var label = index == 0 ? "A" : "B";
+            var label = index == 0 ? "Session" : "Reference";
             var color = index == 0 ? PrimaryColor : ReferenceColor;
             lines.Add(new ChartLine($"{label} lateral", trace.Points
-                .Select(point => new ChartValue(point.DistanceM, point.LateralG)).ToArray(), color));
+                .Select(point => new ChartValue(point.DistanceM, point.LateralG)).ToArray(), color,
+                DeltaKey: "lateral"));
             lines.Add(new ChartLine($"{label} longitudinal", trace.Points
                 .Select(point => new ChartValue(point.DistanceM, point.LongitudinalG)).ToArray(),
-                color, Dashed: true));
+                color, Dashed: true, DeltaKey: "longitudinal"));
         }
 
         return lines;
@@ -2001,9 +2298,10 @@ public partial class MainWindow : Window
         string label)
     {
         return traces.Select((trace, index) => new ChartLine(
-                $"{(index == 0 ? "A" : "B")} {label}",
+                $"{(index == 0 ? "Session" : "Reference")} {label}",
                 trace.Points.Select(point => new ChartValue(point.DistanceM, getValue(point))).ToArray(),
-                index == 0 ? PrimaryColor : ReferenceColor))
+                index == 0 ? PrimaryColor : ReferenceColor,
+                DeltaKey: label))
             .ToArray();
     }
 
@@ -2012,7 +2310,7 @@ public partial class MainWindow : Window
         string channelName)
     {
         return traces.Select((trace, index) => new ChartLine(
-                index == 0 ? "A" : "B",
+                index == 0 ? "Session" : "Reference",
                 trace.GetChannelValues(channelName),
                 index == 0 ? PrimaryColor : ReferenceColor))
             .ToArray();
@@ -2020,42 +2318,56 @@ public partial class MainWindow : Window
 
     private void UpdateStatistics()
     {
-        UpdateLapTypeTag(PrimaryLapTypeText, PrimaryLapDateText, _primaryTrace?.Lap);
-        UpdateLapTypeTag(ReferenceLapTypeText, ReferenceLapDateText, _referenceTrace?.Lap);
+        UpdateLapTypeTag(PrimaryLapTypeText, _primaryLap);
+        UpdateLapTypeTag(ReferenceLapTypeText, _referenceLap);
+        PrimaryLapDetailsText.Text = _primaryLap is null
+            ? string.Empty
+            : $"{GetVehicleName(_primaryLap.Session)}  ·  " +
+              $"{GetSessionEdits(_primaryLap.Session).TrackCondition}";
+        ReferenceLapDetailsText.Text = _referenceLap is null
+            ? "Right-click a lap to set reference"
+            : $"{GetVehicleName(_referenceLap.Session)}  ·  " +
+              $"{GetSessionEdits(_referenceLap.Session).TrackCondition}";
+        PrimaryLapText.Text = _primaryLap is null
+            ? "—"
+            : FormatLapSummary(_primaryLap, _primaryTrace?.LapDurationSeconds ??
+                _primaryLap.DurationMs / 1000d);
+        ReferenceLapText.Text = _referenceLap is null
+            ? "—"
+            : FormatLapSummary(_referenceLap, _referenceTrace?.LapDurationSeconds ??
+                _referenceLap.DurationMs / 1000d);
         if (_primaryTrace is null)
         {
-            PrimaryLapText.Text = "—";
-            ReferenceLapText.Text = _referenceTrace is null
-                ? "—"
-                : FormatLapTime(_referenceTrace.LapDurationSeconds);
             LapDeltaText.Text = "—";
             LapDeltaText.Foreground = Brushes.White;
             return;
         }
 
-        PrimaryLapText.Text = FormatLapTime(_primaryTrace.LapDurationSeconds);
         if (_referenceTrace is null)
         {
-            ReferenceLapText.Text = "—";
             LapDeltaText.Text = "—";
             LapDeltaText.Foreground = Brushes.White;
             return;
         }
 
-        ReferenceLapText.Text = FormatLapTime(_referenceTrace.LapDurationSeconds);
         var delta = _primaryTrace.LapDurationSeconds - _referenceTrace.LapDurationSeconds;
         LapDeltaText.Text = $"{(delta > 0 ? "+" : string.Empty)}{delta:0.000}s";
         LapDeltaText.Foreground = delta <= 0 ? Brushes.LightGreen : Brushes.Orange;
     }
 
-    private void UpdateLapTypeTag(TextBlock tag, TextBlock date, LapInfo? lap)
+    private string FormatLapSummary(LapInfo lap, double durationSeconds)
+    {
+        var lapDate = lap.Session.LocalStart.AddMilliseconds(lap.StartTimeSessionMs);
+        return $"{GetDriverName(lap.Session)}  ·  {lapDate:MMM d, yyyy}  ·  " +
+               $"{lap.Label}  ·  {FormatLapTime(durationSeconds)}";
+    }
+
+    private void UpdateLapTypeTag(TextBlock tag, LapInfo? lap)
     {
         if (lap is null)
         {
             tag.Text = string.Empty;
             tag.Visibility = Visibility.Collapsed;
-            date.Text = string.Empty;
-            date.Visibility = Visibility.Collapsed;
             return;
         }
 
@@ -2064,7 +2376,6 @@ public partial class MainWindow : Window
             tag.Text = "Optimal";
             tag.Foreground = Brushes.MediumPurple;
             tag.Visibility = Visibility.Visible;
-            SetLapDateLabel(date, lap);
             return;
         }
 
@@ -2075,27 +2386,15 @@ public partial class MainWindow : Window
             tag.Text = "Fastest";
             tag.Foreground = Brushes.LimeGreen;
             tag.Visibility = Visibility.Visible;
-            SetLapDateLabel(date, lap);
             return;
         }
 
         tag.Text = string.Empty;
         tag.Visibility = Visibility.Collapsed;
-        date.Text = string.Empty;
-        date.Visibility = Visibility.Collapsed;
-    }
-
-    private static void SetLapDateLabel(TextBlock date, LapInfo lap)
-    {
-        date.Text = lap.Session.LocalStart
-            .AddMilliseconds(lap.StartTimeSessionMs)
-            .ToString("MMM d, yyyy  h:mm tt", CultureInfo.CurrentCulture);
-        date.Visibility = Visibility.Visible;
     }
 
     private void UpdateReferenceHeader()
     {
-        ReferenceLapHeaderText.Text = _referenceLap?.ReferenceLabel ?? "Right-click a lap to set reference";
         UpdateStatistics();
     }
 
@@ -2140,7 +2439,6 @@ public partial class MainWindow : Window
         var generation = ++_overviewGeneration;
         DataViewPanel.Visibility = Visibility.Collapsed;
         TrackOverviewPanel.Visibility = Visibility.Visible;
-        SessionDetailsPanel.Visibility = Visibility.Collapsed;
         var sessions = (visibleSessions ?? location.Sessions)
             .Where(session => !IsVehicleHidden(GetVehicleName(session)))
             .ToArray();
@@ -2181,6 +2479,13 @@ public partial class MainWindow : Window
                 return;
             }
 
+            var segmentMap = await LoadSegmentMapAsync(meanlinePath);
+            if (generation != _overviewGeneration)
+            {
+                return;
+            }
+
+            TrackOverviewMap.SegmentMap = segmentMap;
             TrackOverviewMap.MeanlinePoints = meanlinePoints;
             TrackOverviewMap.Traces = [];
 
@@ -2291,7 +2596,9 @@ public partial class MainWindow : Window
                                     false),
                             optimalLap is null
                                 ? null
-                                : new LapNavigationTarget(optimalLap.Session, optimalLap.DurationMs, true));
+                                : new LapNavigationTarget(optimalLap.Session, optimalLap.DurationMs, true),
+                            sessions.Sum(session =>
+                                lapCounts.TryGetValue(session.FilePath, out var count) ? count : 0));
                     })
                     .ToArray();
                 return new TrackDriverStats(driverGroup.Key, driverLaps.ToString("N0"), cars);
@@ -2307,65 +2614,82 @@ public partial class MainWindow : Window
             $"{location.DisplayName} · {visibleSessions.Count:N0} sessions · {vehicleGroups.Length:N0} vehicles";
     }
 
-    private void SaveSessionDetails_Click(object sender, RoutedEventArgs e)
+    private void ShowSessionDetailsDialog(SessionInfo session)
     {
-        if (_selectedSession is null)
+        var edits = GetSessionEdits(session);
+        var vehicleDescription = string.IsNullOrWhiteSpace(session.VehicleAlias)
+            ? string.IsNullOrWhiteSpace(session.AiMData?.VehicleName)
+                ? "No vehicle alias was included in the session metadata."
+                : $"AiM vehicle: {session.AiMData.VehicleName}"
+            : _vehicleCatalog.ResolveAlias(session.VehicleAlias) is null
+                ? $"No catalog vehicle ID matches alias {session.VehicleAlias}. Select a car above."
+                : $"Vehicle alias: {session.VehicleAlias}";
+        var driverDescription = !string.IsNullOrWhiteSpace(session.GarminGuid)
+            ? $"Garmin profile: {session.GarminGuid}"
+            : string.IsNullOrWhiteSpace(session.AiMData?.DriverName)
+                ? "No driver profile ID was included in the session metadata."
+                : $"AiM driver: {session.AiMData.DriverName}";
+        var dialog = new SessionDetailsDialog(
+            $"{(_trackBySession.TryGetValue(session.FilePath, out var sessionTrack) ? sessionTrack.DisplayName : session.MeanlineTrackName)}  ·  {session.LocalStart:MMM d, yyyy  h:mm tt}",
+            _vehicleChoices,
+            BuildSessionLayoutChoices(session),
+            _viewerSettings.SessionLayoutAssignments.TryGetValue(session.SessionGuid, out var layoutAssignment)
+                ? layoutAssignment
+                : UseSourceLayout,
+            edits,
+            $"{vehicleDescription} · {driverDescription}",
+            details => SaveSessionDetails(session, details))
         {
-            return;
-        }
+            Owner = this
+        };
+        dialog.ShowDialog();
+    }
 
-        var vehicleName = VehicleNameCombo.Text.Trim();
-        if (string.IsNullOrWhiteSpace(vehicleName))
-        {
-            MessageBox.Show(this, "Enter the car or vehicle name for this session.",
-                "Vehicle name required", MessageBoxButton.OK, MessageBoxImage.Information);
-            return;
-        }
-
-        var trackCondition = string.IsNullOrWhiteSpace(TrackConditionCombo.Text)
-            ? "UNKNOWN"
-            : TrackConditionCombo.Text.Trim().ToUpperInvariant();
+    private bool SaveSessionDetails(SessionInfo session, SessionDetailsResult details)
+    {
+        var vehicleName = details.VehicleName;
+        var trackCondition = details.TrackCondition;
         var conditionChanged = !trackCondition.Equals(
-            GetSessionEdits(_selectedSession).TrackCondition, StringComparison.OrdinalIgnoreCase);
+            GetSessionEdits(session).TrackCondition, StringComparison.OrdinalIgnoreCase);
         var metadataNeedsUpdate = !trackCondition.Equals(
-            _selectedSession.TrackCondition, StringComparison.OrdinalIgnoreCase);
-        if (_selectedSession.AiMData is null && metadataNeedsUpdate &&
-            string.IsNullOrWhiteSpace(_selectedSession.SessionMetadataPath) &&
+            session.TrackCondition, StringComparison.OrdinalIgnoreCase);
+        if (session.AiMData is null && metadataNeedsUpdate &&
+            string.IsNullOrWhiteSpace(session.SessionMetadataPath) &&
             conditionChanged)
         {
             MessageBox.Show(this,
                 "This session has no metadata file to update, so its track condition cannot be changed.",
                 "Session metadata unavailable", MessageBoxButton.OK, MessageBoxImage.Error);
-            return;
+            return false;
         }
 
-        if (metadataNeedsUpdate && !string.IsNullOrWhiteSpace(_selectedSession.SessionMetadataPath))
+        if (metadataNeedsUpdate && !string.IsNullOrWhiteSpace(session.SessionMetadataPath))
         {
             try
             {
-                TelemetryLoader.WriteTrackCondition(_selectedSession.SessionMetadataPath, trackCondition);
+                TelemetryLoader.WriteTrackCondition(session.SessionMetadataPath, trackCondition);
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
                                                JsonException or InvalidDataException or ArgumentException)
             {
                 MessageBox.Show(this,
-                    $"The track condition could not be saved to {_selectedSession.SessionMetadataPath}.{Environment.NewLine}{exception.Message}",
+                    $"The track condition could not be saved to {session.SessionMetadataPath}.{Environment.NewLine}{exception.Message}",
                     "Could not save track condition", MessageBoxButton.OK, MessageBoxImage.Error);
-                return;
+                return false;
             }
         }
 
         var updatedLayoutAssignments = new Dictionary<string, string>(
             _viewerSettings.SessionLayoutAssignments, StringComparer.OrdinalIgnoreCase);
-        var selectedLayout = SessionTrackCombo.SelectedValue as string;
+        var selectedLayout = details.LayoutValue;
         if (string.IsNullOrWhiteSpace(selectedLayout) ||
             selectedLayout.Equals(UseSourceLayout, StringComparison.OrdinalIgnoreCase))
         {
-            updatedLayoutAssignments.Remove(_selectedSession.SessionGuid);
+            updatedLayoutAssignments.Remove(session.SessionGuid);
         }
         else
         {
-            updatedLayoutAssignments[_selectedSession.SessionGuid] = selectedLayout;
+            updatedLayoutAssignments[session.SessionGuid] = selectedLayout;
         }
 
         if (!updatedLayoutAssignments.OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
@@ -2391,25 +2715,25 @@ public partial class MainWindow : Window
             if (!SaveViewerSettings(
                     updatedSettings, "Could not save track assignment", "The session's track assignment could not be saved to"))
             {
-                return;
+                return false;
             }
 
             _viewerSettings = updatedSettings;
             BuildTrackLocations();
         }
 
-        _sessionEdits[_selectedSession.SessionGuid] = new SessionEdits(
+        _sessionEdits[session.SessionGuid] = new SessionEdits(
             vehicleName,
             trackCondition,
-            string.IsNullOrWhiteSpace(RaceTypeBox.Text) ? "TRACK" : RaceTypeBox.Text.Trim(),
-            DriverNameBox.Text.Trim());
+            details.RaceType,
+            details.DriverName);
         if (!SaveSessionEdits())
         {
-            return;
+            return false;
         }
 
         BuildSessionTree();
-        var node = FindSessionNode(_selectedSession);
+        var node = FindSessionNode(session);
         if (node is not null)
         {
             ExpandAncestors(node);
@@ -2418,6 +2742,7 @@ public partial class MainWindow : Window
         }
 
         StatusText.Text = "Session vehicle and conditions saved.";
+        return true;
     }
 
     private TreeViewItem? FindSessionNode(SessionInfo session)
@@ -2439,13 +2764,13 @@ public partial class MainWindow : Window
 
     private string GetVehicleName(SessionInfo session)
     {
-        if (!string.IsNullOrWhiteSpace(session.VehicleAlias) &&
-            _vehicleMappings.TryGetValue(session.VehicleAlias, out var mappedName))
+        if (_viewerSettings.SessionVehicleMappings.TryGetValue(session.SessionGuid, out var mappedName))
         {
             return mappedName;
         }
 
-        if (_viewerSettings.SessionVehicleMappings.TryGetValue(session.SessionGuid, out mappedName))
+        if (!string.IsNullOrWhiteSpace(session.VehicleAlias) &&
+            _vehicleMappings.TryGetValue(session.VehicleAlias, out mappedName))
         {
             return mappedName;
         }
@@ -2493,33 +2818,6 @@ public partial class MainWindow : Window
             : string.IsNullOrWhiteSpace(session.AiMData?.DriverName)
                 ? "Unknown driver"
                 : session.AiMData.DriverName;
-
-    private void PopulateSessionEditor(SessionInfo session)
-    {
-        var edits = GetSessionEdits(session);
-        VehicleNameCombo.Text = edits.VehicleName;
-        DriverNameBox.Text = edits.DriverName;
-        SessionTrackCombo.ItemsSource = BuildSessionLayoutChoices(session);
-        SessionTrackCombo.SelectedValue =
-            _viewerSettings.SessionLayoutAssignments.TryGetValue(session.SessionGuid, out var layoutAssignment)
-                ? layoutAssignment
-                : UseSourceLayout;
-        TrackConditionCombo.Text = edits.TrackCondition;
-        RaceTypeBox.Text = edits.RaceType;
-        var vehicleDescription = string.IsNullOrWhiteSpace(session.VehicleAlias)
-            ? string.IsNullOrWhiteSpace(session.AiMData?.VehicleName)
-                ? "No vehicle alias was included in the session metadata."
-                : $"AiM vehicle: {session.AiMData.VehicleName}"
-            : _vehicleCatalog.ResolveAlias(session.VehicleAlias) is null
-                ? $"No catalog vehicle ID matches alias {session.VehicleAlias}. Select a car above."
-                : $"Vehicle alias: {session.VehicleAlias}";
-        var driverDescription = !string.IsNullOrWhiteSpace(session.GarminGuid)
-            ? $"Garmin profile: {session.GarminGuid}"
-            : string.IsNullOrWhiteSpace(session.AiMData?.DriverName)
-                ? "No driver profile ID was included in the session metadata."
-                : $"AiM driver: {session.AiMData.DriverName}";
-        SessionAliasText.Text = $"{vehicleDescription} · {driverDescription}";
-    }
 
     private IReadOnlyList<SessionLayoutChoice> BuildSessionLayoutChoices(SessionInfo session)
     {

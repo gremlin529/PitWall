@@ -1,0 +1,52 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <AssemblyName>PitWall</AssemblyName>
+    <RootNamespace>PitWallApp</RootNamespace>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <BuiltInComInteropSupport>false</BuiltInComInteropSupport>
+    <AvaloniaUseCompiledBindingsByDefault>false</AvaloniaUseCompiledBindingsByDefault>
+    <ApplicationIcon>..\Assets\Pitwall.ico</ApplicationIcon>
+    <DefineConstants>$(DefineConstants);PITWALL_AVALONIA</DefineConstants>
+    <PitWallRid>$(RuntimeIdentifier)</PitWallRid>
+    <PitWallRid Condition="'$(PitWallRid)' == ''">$(NETCoreSdkRuntimeIdentifier)</PitWallRid>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.2.5" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.2.5" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.2.5" />
+    <PackageReference Include="Tmds.DBus.Protocol" Version="0.21.3" />
+  </ItemGroup>
+
+  <!-- Platform-neutral parsing and models shared with the WPF app. -->
+  <ItemGroup>
+    <Compile Include="..\TelemetryLoader.cs" Link="Shared\TelemetryLoader.cs" />
+    <Compile Include="..\TelemetryModels.cs" Link="Shared\TelemetryModels.cs" />
+  </ItemGroup>
+
+  <!-- XRK helper: built by ..\XrkReader\build.sh (macOS/Linux); Windows reuses the existing exe. -->
+  <ItemGroup>
+    <Content Include="Assets\xrk\$(PitWallRid)\XrkReader"
+             Condition="!$(PitWallRid.StartsWith('win')) And Exists('Assets\xrk\$(PitWallRid)\XrkReader')"
+             TargetPath="XrkReader"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\Assets\XrkReader.exe"
+             Condition="$(PitWallRid.StartsWith('win'))"
+             TargetPath="XrkReader.exe"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\Assets\XrkReader-Third-Party-Notices.txt"
+             TargetPath="XrkReader-Third-Party-Notices.txt"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <Target Name="WarnMissingXrkHelper" BeforeTargets="Build"
+          Condition="!$(PitWallRid.StartsWith('win')) And !Exists('Assets\xrk\$(PitWallRid)\XrkReader')">
+    <Warning Text="XRK helper for '$(PitWallRid)' not found; .xrk files will fail to load. Run XrkReader/build.sh first." />
+  </Target>
+</Project>

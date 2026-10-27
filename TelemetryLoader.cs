@@ -65,7 +65,8 @@ internal static partial class TelemetryLoader
 
     public static bool HasSessionFiles(string folder) =>
         EnumerateFilesRecursively(folder, "autosport-performance-*.json").Any() ||
-        EnumerateFilesRecursively(folder, "*.xrk").Any();
+        EnumerateFilesRecursively(folder, "*.xrk").Any() ||
+        EnumerateAimCsvFiles(folder).Any();
 
     public static IReadOnlyDictionary<string, IReadOnlyList<string>> BuildDataFileIndex(string folder) =>
         EnumerateFilesRecursively(folder, "autosport-*.json")
@@ -138,9 +139,15 @@ internal static partial class TelemetryLoader
             ReadOptionalDouble(LapStartTimeRegex(), optimalLapText));
     }
 
+    public static string ComputeAiMSessionId(string filePath) =>
+        Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(filePath).ToUpperInvariant())))
+            .ToLowerInvariant();
+
     public static SessionInfo ReadAiMSessionInfo(string filePath)
     {
-        var readerPath = Path.Combine(AppContext.BaseDirectory, "XrkReader.exe");
+        var readerPath = Path.Combine(
+            AppContext.BaseDirectory, OperatingSystem.IsWindows() ? "XrkReader.exe" : "XrkReader");
         if (!File.Exists(readerPath))
         {
             throw new FileNotFoundException(
@@ -207,9 +214,7 @@ internal static partial class TelemetryLoader
             laps = [CreateAiMFallbackLap(samples, channels)];
         }
 
-        var sessionId = Convert.ToHexString(
-                SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(filePath).ToUpperInvariant())))
-            .ToLowerInvariant();
+        var sessionId = ComputeAiMSessionId(filePath);
         var localStart = ReadAiMStartTime(root, filePath);
         var locationLatitude = samples.Average(sample => sample.Latitude);
         var locationLongitude = samples.Average(sample => sample.Longitude);
@@ -465,6 +470,8 @@ internal static partial class TelemetryLoader
         }
 
         var points = new List<TrackPoint>(data.GetArrayLength());
+        var topoAltitudes = new List<double>(points.Capacity);
+        var hasMeasuredAltitude = false;
         foreach (var item in data.EnumerateArray())
         {
             if (!item.TryGetProperty("centerPositionDeg", out var position))
@@ -477,7 +484,10 @@ internal static partial class TelemetryLoader
             var distance = GetNumber(item, "distanceM");
             if (double.IsFinite(latitude) && double.IsFinite(longitude) && double.IsFinite(distance))
             {
-                points.Add(new TrackPoint(distance, latitude, longitude, GetNumber(item, "trackWidthM", 0)));
+                var altitude = GetNumber(item, "avgAltitudeM");
+                hasMeasuredAltitude |= double.IsFinite(altitude) && altitude != 0;
+                points.Add(new TrackPoint(distance, latitude, longitude, GetNumber(item, "trackWidthM", 0), altitude));
+                topoAltitudes.Add(GetNumber(item, "topoAltitudeM"));
             }
         }
 
@@ -486,7 +496,50 @@ internal static partial class TelemetryLoader
             throw new InvalidDataException($"Not enough GPS points were found in {Path.GetFileName(filePath)}.");
         }
 
+        // Some meanlines carry no measured altitude (all zeros); use the terrain elevation instead.
+        if (!hasMeasuredAltitude)
+        {
+            for (var index = 0; index < points.Count; index++)
+            {
+                points[index] = points[index] with { AltitudeM = topoAltitudes[index] };
+            }
+        }
+
         return points;
+    }
+
+    public static TrackSegmentMap? ReadMeanlineSegments(string filePath)
+    {
+        using var stream = File.OpenRead(filePath);
+        using var document = JsonDocument.Parse(stream);
+        var root = document.RootElement;
+        if (!root.TryGetProperty("referenceSegments", out var reference) ||
+            !reference.TryGetProperty("segments", out var segmentArray) ||
+            segmentArray.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var segments = segmentArray.EnumerateArray()
+            .Select(segment => (Start: GetNumber(segment, "startProgression"),
+                End: GetNumber(segment, "endProgression")))
+            .Where(segment => double.IsFinite(segment.Start) && double.IsFinite(segment.End))
+            .OrderBy(segment => segment.Start)
+            .ToArray();
+        if (segments.Length < 2)
+        {
+            return null;
+        }
+
+        // Neighbouring segments overlap slightly, so hand over halfway through the overlap.
+        var boundaries = new double[segments.Length - 1];
+        for (var index = 0; index < boundaries.Length; index++)
+        {
+            boundaries[index] = (segments[index].End + segments[index + 1].Start) / 2;
+        }
+
+        var length = GetNumber(root, "lengthM", segments[^1].End);
+        return length > 0 ? new TrackSegmentMap(boundaries, length) : null;
     }
 
     public static VehicleCatalog ReadVehicleCatalog(string folder)

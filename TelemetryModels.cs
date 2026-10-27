@@ -160,7 +160,31 @@ internal sealed record VehicleCatalog(IReadOnlyList<VehicleCatalogEntry> Vehicle
     }
 }
 
-internal sealed record TrackPoint(double DistanceM, double Latitude, double Longitude, double WidthM);
+internal sealed record TrackPoint(double DistanceM, double Latitude, double Longitude, double WidthM, double AltitudeM = double.NaN);
+
+/// <summary>
+/// Track segment layout from a meanline file. <paramref name="BoundariesM"/> holds the distance where
+/// each segment hands over to the next (one fewer entry than segments), measured over <paramref name="LengthM"/>.
+/// </summary>
+internal sealed record TrackSegmentMap(IReadOnlyList<double> BoundariesM, double LengthM)
+{
+    public int IndexAt(double distanceM)
+    {
+        var index = 0;
+        while (index < BoundariesM.Count && distanceM >= BoundariesM[index])
+        {
+            index++;
+        }
+
+        return index;
+    }
+
+    public TrackSegmentMap ScaledTo(double lengthM)
+    {
+        var scale = LengthM > 0 ? lengthM / LengthM : 1;
+        return new TrackSegmentMap(BoundariesM.Select(boundary => boundary * scale).ToArray(), lengthM);
+    }
+}
 
 internal sealed record TrackCarGroup(string Name, IReadOnlyList<SessionInfo> Sessions);
 
@@ -182,7 +206,8 @@ internal sealed record TrackCarStats(
     string VehicleName,
     int Sessions,
     LapNavigationTarget? FastestLap,
-    LapNavigationTarget? OptimalLap)
+    LapNavigationTarget? OptimalLap,
+    int Laps = 0)
 {
     public string FastestLapLabel => FastestLap?.Label ?? "Fastest —";
     public string OptimalLapLabel => OptimalLap?.Label ?? "Optimal —";
@@ -323,8 +348,11 @@ internal sealed record SessionTrace(LapInfo Lap, IReadOnlyList<TelemetryPoint> P
 
 internal sealed record ChartValue(double DistanceM, double Value);
 
+#if !PITWALL_AVALONIA
 internal sealed record ChartLine(
     string Label,
     IReadOnlyList<ChartValue> Values,
     System.Windows.Media.Brush Color,
-    bool Dashed = false);
+    bool Dashed = false,
+    string DeltaKey = "");
+#endif

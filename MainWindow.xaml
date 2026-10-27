@@ -142,32 +142,23 @@
                 MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
             <Grid Margin="22,0">
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                    <Viewbox Width="32" Height="32" Margin="0,0,11,0">
-                        <Canvas Width="32" Height="32">
-                            <Border Width="32" Height="32" CornerRadius="8" Background="#15343A"/>
-                            <Path Data="M 8,25 L 12,7" Stroke="#F2F5F7" StrokeThickness="1.5"
-                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-                            <Path Data="M 12,7 C 15,5 18,7 23,5.5 L 22,14 C 18,15.5 15,13 10.5,15 Z"
-                                  Fill="Transparent" Stroke="#F2F5F7" StrokeThickness="1.2"
-                                  StrokeLineJoin="Round"/>
-                            <Path Data="M 12,7.8 L 15.5,7.3 M 11.5,10.3 L 22.5,9.2 M 11,13 L 22.2,12"
-                                  Stroke="#F2F5F7" StrokeThickness="0.8"/>
-                            <Path Data="M 15.5,7.3 L 15,14 M 19,6.6 L 18.5,14.3"
-                                  Stroke="#F2F5F7" StrokeThickness="0.8"/>
-                            <Path Data="M 12.1,8 L 14.7,7.6 L 14.5,9.8 L 11.7,10.1 Z M 19.5,6.5 L 22.8,5.8 L 22.5,8.7 L 19.3,9 Z M 11,11.5 L 14.3,11.2 L 14,13.8 L 10.5,14.6 Z M 18.2,11.2 L 22.3,10.8 L 22,13.4 L 18,14.1 Z"
-                                  Fill="#F2F5F7"/>
-                        </Canvas>
-                    </Viewbox>
-                    <TextBlock Text="PITWALL" FontSize="14" FontWeight="Bold"
+                    <Image Source="Assets/PitwallLogo.png" Width="38" Height="38" Margin="0,0,11,0"
+                           RenderOptions.BitmapScalingMode="HighQuality"/>
+                    <TextBlock Text="Pit Wall" FontSize="14" FontWeight="Bold"
                                VerticalAlignment="Center"/>
-                    <TextBlock Text="  /  TELEMETRY" Foreground="{StaticResource MutedBrush}"
-                               FontSize="11" VerticalAlignment="Center" Margin="2,1,0,0"/>
+                    <TextBlock x:Name="VersionText" Foreground="{StaticResource MutedBrush}"
+                               FontSize="11" VerticalAlignment="Center" Margin="8,1,0,0"/>
+                    <Button x:Name="UpdateButton" Content="Update available" Click="Update_Click"
+                            Visibility="Collapsed" Margin="14,0,0,0" Padding="10,3" FontSize="11"
+                            Background="#1F4D36" BorderBrush="#2F7A54"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
                     <TextBlock x:Name="SessionCountText" Text="No sessions loaded"
                                Foreground="{StaticResource MutedBrush}" FontSize="11"
                                VerticalAlignment="Center" Margin="0,0,14,0"/>
                     <Button Content="Open data folder" Click="OpenFolder_Click"/>
+                    <Button Content="Import…" Click="Import_Click" Margin="8,0,0,0"
+                            ToolTip="Import PitWall packages into the data folder"/>
                     <Button Content="⚙" Click="Settings_Click" ToolTip="Settings"
                             FontSize="17" Padding="9,3" Margin="8,0,0,0"
                             AutomationProperties.Name="Settings"/>
@@ -190,7 +181,6 @@
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
-                        <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
                     <StackPanel Margin="3,0,0,13">
                         <TextBlock Text="SESSION LIBRARY" FontSize="10" FontWeight="Bold"
@@ -201,44 +191,6 @@
                     <TreeView x:Name="SessionTree" Grid.Row="1"
                               SelectedItemChanged="SessionTree_SelectedItemChanged"
                               ScrollViewer.VerticalScrollBarVisibility="Auto"/>
-                    <Border x:Name="SessionDetailsPanel" Grid.Row="2" Background="#1D2630"
-                            CornerRadius="7" Padding="11" Margin="0,10,0,0" Visibility="Collapsed">
-                        <StackPanel>
-                            <TextBlock Text="SESSION DETAILS" FontSize="9" FontWeight="Bold"
-                                           Foreground="{StaticResource MutedBrush}"/>
-                            <TextBlock Text="Vehicle / car" FontSize="10" Margin="0,10,0,4"
-                                           Foreground="{StaticResource MutedBrush}"/>
-                            <ComboBox x:Name="VehicleNameCombo" IsEditable="True"
-                                      IsTextSearchEnabled="True"/>
-                            <TextBlock Text="Driver" FontSize="10" Margin="0,8,0,4"
-                                       Foreground="{StaticResource MutedBrush}"/>
-                            <TextBox x:Name="DriverNameBox"/>
-                            <TextBlock Text="Track / layout" FontSize="10" Margin="0,8,0,4"
-                                           Foreground="{StaticResource MutedBrush}"/>
-                            <ComboBox x:Name="SessionTrackCombo"
-                                      SelectedValuePath="Value">
-                                <ComboBox.ItemTemplate>
-                                    <DataTemplate>
-                                        <TextBlock Text="{Binding Label}"/>
-                                    </DataTemplate>
-                                </ComboBox.ItemTemplate>
-                            </ComboBox>
-                            <TextBlock Text="Track condition" FontSize="10" Margin="0,8,0,4"
-                                           Foreground="{StaticResource MutedBrush}"/>
-                            <ComboBox x:Name="TrackConditionCombo" IsEditable="True">
-                                <ComboBoxItem Content="DRY"/>
-                                <ComboBoxItem Content="WET"/>
-                                <ComboBoxItem Content="UNKNOWN"/>
-                            </ComboBox>
-                            <TextBlock Text="Session type" FontSize="10" Margin="0,8,0,4"
-                                           Foreground="{StaticResource MutedBrush}"/>
-                            <TextBox x:Name="RaceTypeBox"/>
-                            <Button Content="Save session details" Click="SaveSessionDetails_Click"
-                                    Margin="0,10,0,0"/>
-                            <TextBlock x:Name="SessionAliasText" FontSize="9" TextWrapping="Wrap"
-                                           Foreground="{StaticResource MutedBrush}" Margin="0,8,0,0"/>
-                        </StackPanel>
-                    </Border>
                 </Grid>
             </Border>
 
@@ -264,15 +216,10 @@
                         <StackPanel>
                             <TextBlock x:Name="TrackTitleText" Text="Select a session"
                                            FontSize="21" FontWeight="SemiBold"/>
-                            <TextBlock x:Name="SessionSubtitleText" Text="Choose a session from the library to inspect its telemetry"
-                                           Foreground="{StaticResource MutedBrush}" FontSize="11" Margin="0,3,0,0"/>
                         </StackPanel>
                         <StackPanel Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right">
                             <TextBlock Text="REFERENCE LAP" FontSize="9" FontWeight="Bold"
                                            Foreground="{StaticResource MutedBrush}" HorizontalAlignment="Right"/>
-                            <TextBlock x:Name="ReferenceLapHeaderText" Text="Right-click a lap to set reference"
-                                           FontSize="11" Foreground="#E8EDF2" Margin="0,4,0,0"
-                                           HorizontalAlignment="Right"/>
                         </StackPanel>
                     </Grid>
 
@@ -298,14 +245,13 @@
                                     <StackPanel Grid.Column="1" HorizontalAlignment="Right">
                                         <TextBlock x:Name="PrimaryLapTypeText" FontSize="9" FontWeight="Bold"
                                                    HorizontalAlignment="Right" Visibility="Collapsed"/>
-                                        <TextBlock x:Name="PrimaryLapDateText" FontSize="9"
-                                                   Foreground="{StaticResource MutedBrush}"
-                                                   HorizontalAlignment="Right" Margin="0,3,0,0"
-                                                   Visibility="Collapsed"/>
                                     </StackPanel>
                                 </Grid>
-                                <TextBlock x:Name="PrimaryLapText" Text="—" FontSize="19"
-                                               FontWeight="SemiBold" Margin="0,4,0,0"/>
+                                <TextBlock x:Name="PrimaryLapText" Text="—" FontSize="10"
+                                           FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,5,0,0"/>
+                                <TextBlock x:Name="PrimaryLapDetailsText" FontSize="9"
+                                           Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"
+                                           Margin="0,3,0,0"/>
                             </StackPanel>
                         </Border>
                         <Border Grid.Column="2" Background="{StaticResource PanelBrush}" CornerRadius="7" Padding="13,10">
@@ -320,14 +266,13 @@
                                     <StackPanel Grid.Column="1" HorizontalAlignment="Right">
                                         <TextBlock x:Name="ReferenceLapTypeText" FontSize="9" FontWeight="Bold"
                                                    HorizontalAlignment="Right" Visibility="Collapsed"/>
-                                        <TextBlock x:Name="ReferenceLapDateText" FontSize="9"
-                                                   Foreground="{StaticResource MutedBrush}"
-                                                   HorizontalAlignment="Right" Margin="0,3,0,0"
-                                                   Visibility="Collapsed"/>
                                     </StackPanel>
                                 </Grid>
-                                <TextBlock x:Name="ReferenceLapText" Text="—" FontSize="19"
-                                               FontWeight="SemiBold" Margin="0,4,0,0"/>
+                                <TextBlock x:Name="ReferenceLapText" Text="—" FontSize="10"
+                                           FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,5,0,0"/>
+                                <TextBlock x:Name="ReferenceLapDetailsText" FontSize="9"
+                                           Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"
+                                           Margin="0,3,0,0"/>
                             </StackPanel>
                         </Border>
                         <Border Grid.Column="4" Background="{StaticResource PanelBrush}" CornerRadius="7" Padding="13,10">
@@ -391,7 +336,7 @@
                         </Grid.ColumnDefinitions>
                         <Border Grid.Column="0" Background="{StaticResource PanelBrush}"
                                 CornerRadius="10" ClipToBounds="True">
-                            <local:TrackMap x:Name="TrackOverviewMap"/>
+                            <local:TrackMap x:Name="TrackOverviewMap" Enable3DOverview="True"/>
                         </Border>
                         <StackPanel Grid.Column="2">
                             <TextBlock Text="TRACK INTELLIGENCE" FontSize="10" FontWeight="Bold"
@@ -476,9 +421,10 @@
                                                                     <TextBlock Text="{Binding VehicleName}"
                                                                                FontSize="10"
                                                                                Foreground="{StaticResource AccentBrush}"/>
-                                                                    <TextBlock Text="{Binding Sessions, StringFormat={}{0} sessions}"
-                                                                               FontSize="9"
-                                                                               Foreground="{StaticResource MutedBrush}"/>
+                                                                    <TextBlock FontSize="9"
+                                                                               Foreground="{StaticResource MutedBrush}">
+                                                                        <Run Text="{Binding Sessions, Mode=OneWay}"/><Run Text=" sessions · "/><Run Text="{Binding Laps, Mode=OneWay}"/><Run Text=" laps"/>
+                                                                    </TextBlock>
                                                                 </StackPanel>
                                                                 <StackPanel Grid.Column="1"
                                                                             VerticalAlignment="Center"

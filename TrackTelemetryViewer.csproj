@@ -2,13 +2,16 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <AssemblyName>PitWall</AssemblyName>
+    <Version>0.2.1</Version>
     <TargetFramework>net9.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
     <ApplicationIcon>Assets\Pitwall.ico</ApplicationIcon>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <DefaultItemExcludes>$(DefaultItemExcludes);PitWall.Avalonia/**</DefaultItemExcludes>
   </PropertyGroup>
   <ItemGroup>
+    <Resource Include="Assets\PitwallLogo.png" />
     <Content Include="Assets\XrkReader.exe"
              TargetPath="XrkReader.exe"
              CopyToOutputDirectory="PreserveNewest"
