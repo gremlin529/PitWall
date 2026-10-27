@@ -35,6 +35,12 @@ internal sealed class TrackMap : FrameworkElement
     private IReadOnlyList<IReadOnlyList<ProjectedTrackPoint>> _projectedTraces = [];
     private readonly DispatcherTimer _overviewTimer;
     private bool _enable3DOverview;
+    private const double DefaultOverviewPitchDegrees = 52;
+    private bool _manualOrbit;
+    private double _orbitYawDegrees;
+    private double _orbitPitchDegrees = DefaultOverviewPitchDegrees;
+    private Point? _orbitDragPosition;
+    private readonly DispatcherTimer _orbitIdleTimer = new() { Interval = TimeSpan.FromSeconds(10) };
 
     public TrackMap()
     {
@@ -45,6 +51,7 @@ internal sealed class TrackMap : FrameworkElement
             _cachedStaticDrawing = null;
             InvalidateVisual();
         };
+        _orbitIdleTimer.Tick += (_, _) => ResumeOverviewAnimation();
         Loaded += (_, _) => UpdateOverviewTimer();
         Unloaded += (_, _) => UpdateOverviewTimer();
         IsVisibleChanged += (_, _) => UpdateOverviewTimer();
@@ -62,14 +69,13 @@ internal sealed class TrackMap : FrameworkElement
 
             _enable3DOverview = value;
             _cachedStaticDrawing = null;
-            UpdateOverviewTimer();
-            InvalidateVisual();
+            ResumeOverviewAnimation();
         }
     }
 
     private void UpdateOverviewTimer()
     {
-        if (IsLoaded && IsVisible && Enable3DOverview)
+        if (IsLoaded && IsVisible && Enable3DOverview && !_manualOrbit)
         {
             _overviewTimer.Start();
         }
@@ -97,7 +103,7 @@ internal sealed class TrackMap : FrameworkElement
         {
             _meanlinePoints = value;
             _cachedStaticDrawing = null;
-            InvalidateVisual();
+            ResumeOverviewAnimation();
         }
     }
 
@@ -122,10 +128,99 @@ internal sealed class TrackMap : FrameworkElement
         }
     }
 
+    private void ResumeOverviewAnimation()
+    {
+        _orbitIdleTimer.Stop();
+        _manualOrbit = false;
+        _orbitPitchDegrees = DefaultOverviewPitchDegrees;
+        _orbitDragPosition = null;
+        ReleaseMouseCapture();
+        Cursor = null;
+        UpdateOverviewTimer();
+        InvalidateVisual();
+    }
+
+    private double AnimatedYawDegrees() =>
+        24 * Math.Sin((Environment.TickCount64 - _overviewStartTicks) / 1000d * 2 * Math.PI / 26);
+
+    // Clicking the 3D overview freezes the orbit where it is; dragging then spins (horizontal) and tilts (vertical)
+    // the map, and a double-click or 10 seconds without dragging hands it back to the animation.
+    protected override void OnMouseLeftButtonDown(MouseButtonEventArgs e)
+    {
+        base.OnMouseLeftButtonDown(e);
+        if (!Enable3DOverview || _meanlinePoints.Count < 2)
+        {
+            return;
+        }
+
+        if (e.ClickCount == 2)
+        {
+            ResumeOverviewAnimation();
+            e.Handled = true;
+            return;
+        }
+
+        if (!_manualOrbit)
+        {
+            _orbitYawDegrees = AnimatedYawDegrees();
+            _manualOrbit = true;
+            UpdateOverviewTimer();
+        }
+
+        _orbitIdleTimer.Stop();
+        _orbitDragPosition = e.GetPosition(this);
+        CaptureMouse();
+        Cursor = Cursors.SizeAll;
+        e.Handled = true;
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        base.OnMouseMove(e);
+        if (_orbitDragPosition is not { } previous || e.LeftButton != MouseButtonState.Pressed)
+        {
+            return;
+        }
+
+        var position = e.GetPosition(this);
+        _orbitYawDegrees = (_orbitYawDegrees + (position.X - previous.X) * 0.5) % 360;
+        _orbitPitchDegrees = Math.Clamp(_orbitPitchDegrees + (position.Y - previous.Y) * 0.4, 5, 90);
+        _orbitDragPosition = position;
+        _cachedStaticDrawing = null;
+        InvalidateVisual();
+    }
+
+    protected override void OnMouseLeftButtonUp(MouseButtonEventArgs e)
+    {
+        base.OnMouseLeftButtonUp(e);
+        if (_orbitDragPosition is null)
+        {
+            return;
+        }
+
+        _orbitDragPosition = null;
+        ReleaseMouseCapture();
+        Cursor = null;
+        e.Handled = true;
+    }
+
+    protected override void OnLostMouseCapture(MouseEventArgs e)
+    {
+        base.OnLostMouseCapture(e);
+        _orbitDragPosition = null;
+        Cursor = null;
+        if (_manualOrbit)
+        {
+            _orbitIdleTimer.Start();
+        }
+    }
+
     protected override void OnRender(DrawingContext drawingContext)
     {
         base.OnRender(drawingContext);
         var size = new Size(ActualWidth, ActualHeight);
+        // Transparent fill so clicks anywhere on the map reach the orbit handlers, not just on drawn lines.
+        drawingContext.DrawRectangle(Brushes.Transparent, null, new Rect(size));
         if (_cachedStaticDrawing is null || _cachedDrawingSize != size)
         {
             var cachedDrawing = new DrawingGroup();
@@ -328,11 +423,10 @@ internal sealed class TrackMap : FrameworkElement
             ? (point.AltitudeM - minimumAltitude) * exaggeration
             : 0).ToArray();
 
-        const double pitch = 52 * Math.PI / 180;
+        var pitch = _orbitPitchDegrees * Math.PI / 180;
         var sinPitch = Math.Sin(pitch);
         var cosPitch = Math.Cos(pitch);
-        var seconds = (Environment.TickCount64 - _overviewStartTicks) / 1000d;
-        var yaw = 24 * Math.Sin(seconds * 2 * Math.PI / 26) * Math.PI / 180;
+        var yaw = (_manualOrbit ? _orbitYawDegrees : AnimatedYawDegrees()) * Math.PI / 180;
         var sinYaw = Math.Sin(yaw);
         var cosYaw = Math.Cos(yaw);
         var mapRect = new Rect(24, 36, Math.Max(1, ActualWidth - 48), Math.Max(1, ActualHeight - 64));
@@ -381,7 +475,11 @@ internal sealed class TrackMap : FrameworkElement
                 previous, current);
         }
 
-        DrawText(drawingContext, "TRACK MEANLINE  ·  3D", 14, 12, TextBrush, 9);
+        DrawText(drawingContext,
+            _manualOrbit
+                ? "TRACK MEANLINE  ·  3D  ·  DRAG TO ORBIT  ·  DOUBLE-CLICK TO RESUME"
+                : "TRACK MEANLINE  ·  3D  ·  CLICK TO ORBIT",
+            14, 12, TextBrush, 9);
         if (hasAltitude)
         {
             DrawText(drawingContext,
