@@ -65,7 +65,8 @@ internal static partial class TelemetryLoader
 
     public static bool HasSessionFiles(string folder) =>
         EnumerateFilesRecursively(folder, "autosport-performance-*.json").Any() ||
-        EnumerateFilesRecursively(folder, "*.xrk").Any();
+        EnumerateFilesRecursively(folder, "*.xrk").Any() ||
+        EnumerateAimCsvFiles(folder).Any();
 
     public static IReadOnlyDictionary<string, IReadOnlyList<string>> BuildDataFileIndex(string folder) =>
         EnumerateFilesRecursively(folder, "autosport-*.json")
@@ -469,6 +470,8 @@ internal static partial class TelemetryLoader
         }
 
         var points = new List<TrackPoint>(data.GetArrayLength());
+        var topoAltitudes = new List<double>(points.Capacity);
+        var hasMeasuredAltitude = false;
         foreach (var item in data.EnumerateArray())
         {
             if (!item.TryGetProperty("centerPositionDeg", out var position))
@@ -481,13 +484,25 @@ internal static partial class TelemetryLoader
             var distance = GetNumber(item, "distanceM");
             if (double.IsFinite(latitude) && double.IsFinite(longitude) && double.IsFinite(distance))
             {
-                points.Add(new TrackPoint(distance, latitude, longitude, GetNumber(item, "trackWidthM", 0)));
+                var altitude = GetNumber(item, "avgAltitudeM");
+                hasMeasuredAltitude |= double.IsFinite(altitude) && altitude != 0;
+                points.Add(new TrackPoint(distance, latitude, longitude, GetNumber(item, "trackWidthM", 0), altitude));
+                topoAltitudes.Add(GetNumber(item, "topoAltitudeM"));
             }
         }
 
         if (points.Count < 2)
         {
             throw new InvalidDataException($"Not enough GPS points were found in {Path.GetFileName(filePath)}.");
+        }
+
+        // Some meanlines carry no measured altitude (all zeros); use the terrain elevation instead.
+        if (!hasMeasuredAltitude)
+        {
+            for (var index = 0; index < points.Count; index++)
+            {
+                points[index] = points[index] with { AltitudeM = topoAltitudes[index] };
+            }
         }
 
         return points;

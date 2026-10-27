@@ -100,6 +100,91 @@
     </Style>
     <Style TargetType="ComboBox" BasedOn="{StaticResource DarkComboBoxStyle}"/>
     <Style TargetType="ComboBoxItem" BasedOn="{StaticResource DarkComboBoxItemStyle}"/>
+    <Style TargetType="ScrollBar">
+        <Setter Property="Background" Value="#171E25"/>
+        <Setter Property="Foreground" Value="#536474"/>
+        <Setter Property="Width" Value="12"/>
+        <Setter Property="Height" Value="12"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ScrollBar">
+                    <Grid Background="{TemplateBinding Background}">
+                        <Track x:Name="PART_Track"
+                               Orientation="{TemplateBinding Orientation}"
+                               Minimum="{TemplateBinding Minimum}"
+                               Maximum="{TemplateBinding Maximum}"
+                               Value="{Binding Value, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}"
+                               ViewportSize="{TemplateBinding ViewportSize}"
+                               IsDirectionReversed="True">
+                            <Track.DecreaseRepeatButton>
+                                <RepeatButton x:Name="PART_DecreasePage"
+                                              Command="{x:Static ScrollBar.PageUpCommand}"
+                                              CommandTarget="{Binding RelativeSource={RelativeSource TemplatedParent}}"
+                                              Focusable="False" IsTabStop="False" Opacity="0">
+                                    <RepeatButton.Template>
+                                        <ControlTemplate TargetType="RepeatButton">
+                                            <Border Background="Transparent"/>
+                                        </ControlTemplate>
+                                    </RepeatButton.Template>
+                                </RepeatButton>
+                            </Track.DecreaseRepeatButton>
+                            <Track.Thumb>
+                                <Thumb Background="{TemplateBinding Foreground}" Margin="2">
+                                    <Thumb.Template>
+                                        <ControlTemplate TargetType="Thumb">
+                                            <Border x:Name="ThumbBorder" Background="{TemplateBinding Background}"
+                                                    CornerRadius="4"/>
+                                            <ControlTemplate.Triggers>
+                                                <Trigger Property="IsMouseOver" Value="True">
+                                                    <Setter TargetName="ThumbBorder" Property="Background"
+                                                            Value="#718394"/>
+                                                </Trigger>
+                                                <Trigger Property="IsDragging" Value="True">
+                                                    <Setter TargetName="ThumbBorder" Property="Background"
+                                                            Value="#94A0AD"/>
+                                                </Trigger>
+                                            </ControlTemplate.Triggers>
+                                        </ControlTemplate>
+                                    </Thumb.Template>
+                                </Thumb>
+                            </Track.Thumb>
+                            <Track.IncreaseRepeatButton>
+                                <RepeatButton x:Name="PART_IncreasePage"
+                                              Command="{x:Static ScrollBar.PageDownCommand}"
+                                              CommandTarget="{Binding RelativeSource={RelativeSource TemplatedParent}}"
+                                              Focusable="False" IsTabStop="False" Opacity="0">
+                                    <RepeatButton.Template>
+                                        <ControlTemplate TargetType="RepeatButton">
+                                            <Border Background="Transparent"/>
+                                        </ControlTemplate>
+                                    </RepeatButton.Template>
+                                </RepeatButton>
+                            </Track.IncreaseRepeatButton>
+                        </Track>
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="Orientation" Value="Horizontal">
+                            <Setter Property="Width" Value="Auto"/>
+                            <Setter Property="Height" Value="12"/>
+                            <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False"/>
+                            <Setter TargetName="PART_Track" Property="Orientation" Value="Horizontal"/>
+                            <Setter TargetName="PART_DecreasePage" Property="Command"
+                                    Value="{x:Static ScrollBar.PageLeftCommand}"/>
+                            <Setter TargetName="PART_IncreasePage" Property="Command"
+                                    Value="{x:Static ScrollBar.PageRightCommand}"/>
+                        </Trigger>
+                        <Trigger Property="Orientation" Value="Vertical">
+                            <Setter Property="Width" Value="12"/>
+                            <Setter Property="Height" Value="Auto"/>
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.45"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
     <Style x:Key="DarkContextMenuStyle" TargetType="ContextMenu">
         <Setter Property="Background" Value="#202A35"/>
         <Setter Property="Foreground" Value="#E8EDF2"/>

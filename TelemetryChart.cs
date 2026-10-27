@@ -297,18 +297,40 @@ internal sealed class TelemetryChart : FrameworkElement
 
         var titleWidth = MeasureText(Title, 12, FontWeights.SemiBold);
         var unitWidth = MeasureText(Unit, 10, FontWeights.Normal);
-        var firstValueX = Math.Max(210, 14 + titleWidth + unitWidth + 24);
-        const double valueColumnWidth = 145;
-        for (var index = 0; index < _lines.Count; index++)
+        var x = 14 + titleWidth + unitWidth + 24;
+        var session = _lines.Where(line => line.Label.StartsWith("Session", StringComparison.Ordinal)).ToArray();
+        var reference = _lines.Where(line => line.Label.StartsWith("Reference", StringComparison.Ordinal)).ToArray();
+        foreach (var sessionLine in session)
         {
-            var line = _lines[index];
+            var referenceLine = reference.FirstOrDefault(line => line.DeltaKey == sessionLine.DeltaKey);
+            if (referenceLine is null)
+            {
+                continue;
+            }
+
+            var delta = GetValueAtDistance(sessionLine.Values, _cursorDistanceM) -
+                        GetValueAtDistance(referenceLine.Values, _cursorDistanceM);
+            var name = string.IsNullOrEmpty(sessionLine.DeltaKey) ? "Δ" : $"Δ {sessionLine.DeltaKey}";
+            var text = double.IsFinite(delta) ? $"{name}: {FormatDelta(delta)}" : $"{name}: —";
+            DrawText(drawingContext, text, x, 10, Brushes.White, 9, FontWeights.SemiBold);
+            x += MeasureText(text, 9, FontWeights.SemiBold) + 18;
+        }
+
+        foreach (var line in _lines)
+        {
             var value = GetValueAtDistance(line.Values, _cursorDistanceM);
             var text = double.IsFinite(value)
                 ? $"{line.Label}: {FormatValue(value)}"
                 : $"{line.Label}: —";
-            DrawText(drawingContext, text, firstValueX + index * valueColumnWidth,
-                10, line.Color, 9, FontWeights.SemiBold);
+            DrawText(drawingContext, text, x, 10, line.Color, 9, FontWeights.SemiBold);
+            x += MeasureText(text, 9, FontWeights.SemiBold) + 18;
         }
+    }
+
+    private string FormatDelta(double value)
+    {
+        var formatted = FormatValue(value);
+        return value > 0 ? "+" + formatted : formatted;
     }
 
     private string FormatValue(double value)

@@ -129,6 +129,12 @@ public partial class MainWindow
             {
                 if (session.AiMData is not null)
                 {
+                    if (!session.FilePath.EndsWith(".xrk", StringComparison.OrdinalIgnoreCase))
+                    {
+                        notes.Add($"{session.LocalStart:g}: CSV-sourced sessions can't be exported to XRK.");
+                        continue;
+                    }
+
                     File.Copy(session.FilePath, path);
                 }
                 else

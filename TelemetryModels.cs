@@ -160,7 +160,7 @@ internal sealed record VehicleCatalog(IReadOnlyList<VehicleCatalogEntry> Vehicle
     }
 }
 
-internal sealed record TrackPoint(double DistanceM, double Latitude, double Longitude, double WidthM);
+internal sealed record TrackPoint(double DistanceM, double Latitude, double Longitude, double WidthM, double AltitudeM = double.NaN);
 
 /// <summary>
 /// Track segment layout from a meanline file. <paramref name="BoundariesM"/> holds the distance where
@@ -353,5 +353,6 @@ internal sealed record ChartLine(
     string Label,
     IReadOnlyList<ChartValue> Values,
     System.Windows.Media.Brush Color,
-    bool Dashed = false);
+    bool Dashed = false,
+    string DeltaKey = "");
 #endif
