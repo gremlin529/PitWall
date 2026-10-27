@@ -97,64 +97,157 @@ internal static class AimCsvAlignment
         return path;
     }
 
-    // Replace dead-reckoned distance with the distance along the reference lap at the nearest track position,
-    // so a given distance means the same spot on the circuit in both laps.
+    private const double WarpStepM = 2;
+    private const double HeadingChordM = 8;
+    private const int WarpBandSteps = 200;
+    private const double WarpStretchPenalty = 0.03;
+
+    // Replace dead-reckoned distance with distance along the reference lap by warping the CSV lap's heading
+    // profile onto the reference's, so each corner lands on the same corner; straights follow integrated speed.
+    // Snapping to the nearest track position instead turns the dead-reckoned map's sideways drift into 15-25 m
+    // of along-track error through some corners.
     private static void ProjectDistances(TelemetryPoint[] points, AimCsvTransform transform)
     {
-        var pathLat = transform.PathLatitude!;
-        var pathLon = transform.PathLongitude!;
-        var pathDistance = transform.PathDistanceM!;
-        var count = pathLat.Length;
         var scale = MetersPerDegree * Math.Cos(transform.RefLatitude * Math.PI / 180);
-        var px = new double[count];
-        var py = new double[count];
-        for (var index = 0; index < count; index++)
+        var pathDistance = transform.PathDistanceM!;
+        var csvHeading = HeadingProfile(
+            points.Select(point => (point.Longitude - transform.RefLongitude) * scale).ToArray(),
+            points.Select(point => (point.Latitude - transform.RefLatitude) * MetersPerDegree).ToArray(),
+            points.Select(point => point.DistanceM).ToArray());
+        var referenceHeading = HeadingProfile(
+            transform.PathLongitude!.Select(longitude => (longitude - transform.RefLongitude) * scale).ToArray(),
+            transform.PathLatitude!.Select(latitude => (latitude - transform.RefLatitude) * MetersPerDegree).ToArray(),
+            pathDistance);
+        if (csvHeading.Length < 2 || referenceHeading.Length < 2)
         {
-            px[index] = (pathLon[index] - transform.RefLongitude) * scale;
-            py[index] = (pathLat[index] - transform.RefLatitude) * MetersPerDegree;
+            return;
         }
 
-        var current = 0;
-        var previousDistance = 0d;
+        var warp = WarpHeadings(csvHeading, referenceHeading);
+        var maxDistance = pathDistance[^1];
         for (var index = 0; index < points.Length; index++)
         {
-            var x = (points[index].Longitude - transform.RefLongitude) * scale;
-            var y = (points[index].Latitude - transform.RefLatitude) * MetersPerDegree;
-            var window = index == 0 ? 100 : 30;
-            var best = current;
-            var bestDistance = double.MaxValue;
-            for (var candidate = current; candidate <= Math.Min(count - 1, current + window); candidate++)
+            var position = Math.Clamp(points[index].DistanceM / WarpStepM, 0, warp.Length - 1);
+            var low = Math.Min((int)position, warp.Length - 2);
+            var distance = warp[low] + (warp[low + 1] - warp[low]) * (position - low);
+            points[index] = points[index] with { DistanceM = Math.Min(distance, maxDistance) };
+        }
+    }
+
+    // Heading (radians) every WarpStepM metres along a path, from the chord spanning ±HeadingChordM.
+    private static double[] HeadingProfile(double[] x, double[] y, double[] distance)
+    {
+        var count = (int)Math.Ceiling(distance[^1] / WarpStepM) + 1;
+        var result = new double[count];
+        var behind = 0;
+        var ahead = 0;
+        for (var index = 0; index < count; index++)
+        {
+            var at = index * WarpStepM;
+            while (behind < distance.Length - 1 && distance[behind + 1] < at - HeadingChordM)
             {
-                var d = (px[candidate] - x) * (px[candidate] - x) + (py[candidate] - y) * (py[candidate] - y);
-                if (d < bestDistance)
-                {
-                    bestDistance = d;
-                    best = candidate;
-                }
+                behind++;
             }
 
-            var along = pathDistance[best];
-            foreach (var other in new[] { best - 1, best + 1 })
+            while (ahead < distance.Length - 1 && distance[ahead] < at + HeadingChordM)
             {
-                if (other < 0 || other >= count)
+                ahead++;
+            }
+
+            result[index] = Math.Atan2(x[ahead] - x[behind], y[ahead] - y[behind]);
+        }
+
+        return result;
+    }
+
+    // Banded dynamic time warping of the CSV heading profile onto the reference one, start to start and end to end.
+    // Returns the reference distance for each CSV profile step.
+    private static double[] WarpHeadings(double[] source, double[] target)
+    {
+        var n = source.Length;
+        var m = target.Length;
+        var width = 2 * WarpBandSteps + 1;
+        var cost = new double[n, width];
+        var from = new byte[n, width];
+        int Diagonal(int row) => (int)Math.Round((double)row * (m - 1) / (n - 1));
+
+        for (var i = 0; i < n; i++)
+        {
+            var centre = Diagonal(i);
+            var previousCentre = i > 0 ? Diagonal(i - 1) : 0;
+            for (var offset = 0; offset < width; offset++)
+            {
+                cost[i, offset] = double.PositiveInfinity;
+                var j = centre + offset - WarpBandSteps;
+                if (j < 0 || j >= m)
                 {
                     continue;
                 }
 
-                var dx = px[other] - px[best];
-                var dy = py[other] - py[best];
-                var length = dx * dx + dy * dy;
-                var t = length > 0 ? ((x - px[best]) * dx + (y - py[best]) * dy) / length : 0;
-                if (t > 0 && t <= 1)
+                var difference = Math.IEEERemainder(source[i] - target[j], 2 * Math.PI);
+                var local = difference * difference;
+                if (i == 0 && j == 0)
                 {
-                    along = pathDistance[best] + t * (pathDistance[other] - pathDistance[best]);
+                    cost[i, offset] = local;
+                    continue;
                 }
+
+                var best = double.PositiveInfinity;
+                byte step = 0;
+                if (i > 0)
+                {
+                    var diagonal = j - 1 - previousCentre + WarpBandSteps;
+                    if (diagonal >= 0 && diagonal < width && cost[i - 1, diagonal] < best)
+                    {
+                        best = cost[i - 1, diagonal];
+                        step = 1;
+                    }
+
+                    var up = j - previousCentre + WarpBandSteps;
+                    if (up >= 0 && up < width && cost[i - 1, up] + WarpStretchPenalty < best)
+                    {
+                        best = cost[i - 1, up] + WarpStretchPenalty;
+                        step = 2;
+                    }
+                }
+
+                if (offset > 0 && cost[i, offset - 1] + WarpStretchPenalty < best)
+                {
+                    best = cost[i, offset - 1] + WarpStretchPenalty;
+                    step = 3;
+                }
+
+                cost[i, offset] = best + local;
+                from[i, offset] = step;
+            }
+        }
+
+        var sum = new double[n];
+        var hits = new int[n];
+        var row = n - 1;
+        var column = m - 1;
+        while (true)
+        {
+            sum[row] += column;
+            hits[row]++;
+            var step = from[row, column - Diagonal(row) + WarpBandSteps];
+            if (step == 0)
+            {
+                break;
             }
 
-            previousDistance = Math.Max(previousDistance, along);
-            points[index] = points[index] with { DistanceM = previousDistance };
-            current = Math.Max(current, best - 1);
+            if (step != 3)
+            {
+                row--;
+            }
+
+            if (step != 2)
+            {
+                column--;
+            }
         }
+
+        return sum.Select((total, index) => total / hits[index] * WarpStepM).ToArray();
     }
 
     // Shape matching can't pin the start/finish along a straight, so slide the CSV lap until its speed-vs-distance

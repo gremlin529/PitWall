@@ -140,6 +140,8 @@ internal static partial class TelemetryLoader
         double TimeSeconds(int row) => timeColumn >= 0 ? rows[row][timeColumn] : row * step;
 
         var speedFactor = SpeedToMetersPerSecond(units.ElementAtOrDefault(speedColumn));
+        AlignAccelerometerToGps(rows, longitudinalColumn, speedColumn, headingColumn, lateral: false);
+        AlignAccelerometerToGps(rows, lateralColumn, speedColumn, headingColumn, lateral: true);
         var venue = metadata.GetValueOrDefault("Venue")?.Trim();
         if (string.IsNullOrWhiteSpace(venue))
         {
@@ -317,6 +319,63 @@ internal static partial class TelemetryLoader
         }
 
         return points;
+    }
+
+    // The logger's accelerometer can run behind its GPS (about 0.15 s on lateral in a Race Studio export), which leaves
+    // g traces sitting several metres late against GPS-placed distance. Measure the lag against the acceleration implied
+    // by GPS speed and heading, and re-time the column to match.
+    private static void AlignAccelerometerToGps(
+        List<double[]> rows, int column, int speedColumn, int headingColumn, bool lateral)
+    {
+        const int maxLag = 10;
+        var count = rows.Count;
+        if (column < 0 || column == speedColumn || count < 4 * maxLag)
+        {
+            return;
+        }
+
+        var reference = new double[count];
+        for (var row = 1; row < count - 1; row++)
+        {
+            reference[row] = lateral
+                ? rows[row][speedColumn] *
+                  Math.IEEERemainder(rows[row + 1][headingColumn] - rows[row - 1][headingColumn], 360)
+                : rows[row + 1][speedColumn] - rows[row - 1][speedColumn];
+        }
+
+        var correlation = new double[2 * maxLag + 1];
+        for (var lag = -maxLag; lag <= maxLag; lag++)
+        {
+            double sum = 0;
+            for (var row = maxLag; row < count - maxLag; row++)
+            {
+                sum += rows[row + lag][column] * reference[row];
+            }
+
+            correlation[lag + maxLag] = Math.Abs(sum);
+        }
+
+        var peak = Array.IndexOf(correlation, correlation.Max());
+        if (peak == 0 || peak == correlation.Length - 1)
+        {
+            return;
+        }
+
+        var curvature = correlation[peak - 1] - 2 * correlation[peak] + correlation[peak + 1];
+        var shift = peak - maxLag +
+                    (curvature < 0 ? (correlation[peak - 1] - correlation[peak + 1]) / (2 * curvature) : 0);
+        if (Math.Abs(shift) < 0.25)
+        {
+            return;
+        }
+
+        var original = rows.Select(row => row[column]).ToArray();
+        for (var row = 0; row < count; row++)
+        {
+            var position = Math.Clamp(row + shift, 0, count - 1);
+            var low = Math.Min((int)position, count - 2);
+            rows[row][column] = original[low] + (original[low + 1] - original[low]) * (position - low);
+        }
     }
 
     private static int FindRow(int count, double seconds, Func<int, double> timeSeconds, bool atOrAfter)

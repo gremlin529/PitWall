@@ -262,7 +262,7 @@ internal sealed class TrackMap : FrameworkElement
         {
             var trace = _traces[index];
             var color = index == 0 ? Brushes.DeepSkyBlue : Brushes.Orange;
-            var legendX = ActualWidth - 155 - index * 105;
+            var legendX = ActualWidth - 155 - (_traces.Count - 1 - index) * 105;
             drawingContext.DrawEllipse(color, null, new Point(legendX, legendY + 6), 4, 4);
             DrawText(drawingContext, index == 0 ? "Session" : "Reference",
                 legendX + 9, legendY, TextBrush, 9);
