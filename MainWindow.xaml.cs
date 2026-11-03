@@ -759,7 +759,8 @@ public partial class MainWindow : Window
         var performanceFiles = TelemetryLoader.EnumerateFilesRecursively(folder, "autosport-performance-*.json");
         var aimFiles = TelemetryLoader.EnumerateFilesRecursively(folder, "*.xrk");
         var csvFiles = TelemetryLoader.EnumerateAimCsvFiles(folder);
-        var files = performanceFiles.Concat(aimFiles).Concat(csvFiles)
+        var vboFiles = TelemetryLoader.EnumerateVboFiles(folder);
+        var files = performanceFiles.Concat(aimFiles).Concat(csvFiles).Concat(vboFiles)
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         if (files.Length == 0)
@@ -786,7 +787,9 @@ public partial class MainWindow : Window
                         ? TelemetryLoader.ReadAiMSessionInfo(file)
                         : extension.Equals(".csv", StringComparison.OrdinalIgnoreCase)
                             ? TelemetryLoader.ReadAimCsvSessionInfo(file, GetCsvShiftSeconds)
-                            : TelemetryLoader.ReadSessionInfo(file, dataFileIndex));
+                            : extension.Equals(".vbo", StringComparison.OrdinalIgnoreCase)
+                                ? TelemetryLoader.ReadVboSessionInfo(file)
+                                : TelemetryLoader.ReadSessionInfo(file, dataFileIndex));
                 }
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
                                                    InvalidDataException or ArgumentOutOfRangeException or
@@ -987,6 +990,19 @@ public partial class MainWindow : Window
                     .DefaultIfEmpty(0)
                     .Average();
                 var meanlinePath = members.FirstOrDefault(session => session.MeanlinePath is not null)?.MeanlinePath;
+                if (meanlinePath is null && lengthM > 0)
+                {
+                    // Logger-only groups (AiM/VBOX) have no meanline of their own; borrow the closest-length one from the same venue.
+                    var borrowed = nearbySessions
+                        .Where(session => session.MeanlinePath is not null && session.MeanlineLengthM > 0)
+                        .OrderBy(session => Math.Abs(session.MeanlineLengthM - lengthM))
+                        .FirstOrDefault();
+                    if (borrowed is not null && Math.Abs(borrowed.MeanlineLengthM - lengthM) < lengthM * 0.1)
+                    {
+                        meanlinePath = borrowed.MeanlinePath;
+                    }
+                }
+
                 var location = new TrackLocation(
                     key, latitude, longitude, members, locationTrackName, configurationName, lengthM, meanlinePath,
                     displayGroup.Key);
@@ -2472,6 +2488,11 @@ public partial class MainWindow : Window
                     meanlinePoints = await Task.Run(() => TelemetryLoader.ReadMeanlinePoints(meanlinePath));
                     _meanlineCache[meanlinePath] = meanlinePoints;
                 }
+            }
+
+            if (meanlinePoints.Count == 0)
+            {
+                meanlinePoints = await Task.Run(() => TrackProfileCache.GetOrBuild(sessions));
             }
 
             if (generation != _overviewGeneration)

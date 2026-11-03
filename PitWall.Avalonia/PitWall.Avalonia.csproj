@@ -24,6 +24,7 @@
   <!-- Platform-neutral parsing and models shared with the WPF app. -->
   <ItemGroup>
     <Compile Include="..\TelemetryLoader.cs" Link="Shared\TelemetryLoader.cs" />
+    <Compile Include="..\VboReader.cs" Link="Shared\VboReader.cs" />
     <Compile Include="..\TelemetryModels.cs" Link="Shared\TelemetryModels.cs" />
   </ItemGroup>
 

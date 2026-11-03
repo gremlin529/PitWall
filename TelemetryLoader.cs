@@ -66,7 +66,8 @@ internal static partial class TelemetryLoader
     public static bool HasSessionFiles(string folder) =>
         EnumerateFilesRecursively(folder, "autosport-performance-*.json").Any() ||
         EnumerateFilesRecursively(folder, "*.xrk").Any() ||
-        EnumerateAimCsvFiles(folder).Any();
+        EnumerateAimCsvFiles(folder).Any() ||
+        EnumerateVboFiles(folder).Any();
 
     public static IReadOnlyDictionary<string, IReadOnlyList<string>> BuildDataFileIndex(string folder) =>
         EnumerateFilesRecursively(folder, "autosport-*.json")

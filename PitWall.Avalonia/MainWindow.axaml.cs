@@ -220,7 +220,8 @@ public sealed partial class MainWindow : Window
     {
         report("Finding telemetry files…");
         var files = TelemetryLoader.EnumerateFilesRecursively(folder, "autosport-performance-*.json")
-            .Concat(TelemetryLoader.EnumerateFilesRecursively(folder, "*.xrk")).ToArray();
+            .Concat(TelemetryLoader.EnumerateFilesRecursively(folder, "*.xrk"))
+            .Concat(TelemetryLoader.EnumerateVboFiles(folder)).ToArray();
         var index = TelemetryLoader.BuildDataFileIndex(folder);
         List<SessionInfo> sessions = [];
         List<string> failures = [];
@@ -231,7 +232,9 @@ public sealed partial class MainWindow : Window
             {
                 sessions.Add(Path.GetExtension(file).Equals(".xrk", StringComparison.OrdinalIgnoreCase)
                     ? TelemetryLoader.ReadAiMSessionInfo(file)
-                    : TelemetryLoader.ReadSessionInfo(file, index));
+                    : Path.GetExtension(file).Equals(".vbo", StringComparison.OrdinalIgnoreCase)
+                        ? TelemetryLoader.ReadVboSessionInfo(file)
+                        : TelemetryLoader.ReadSessionInfo(file, index));
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
                                                InvalidDataException or ArgumentOutOfRangeException or
