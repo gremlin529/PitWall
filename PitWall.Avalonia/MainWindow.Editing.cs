@@ -1,13 +1,13 @@
 using System.Text.Json;
 using Avalonia;
 using Avalonia.Controls;
-using Avalonia.Input;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using TrackTelemetryViewer;
 
 namespace PitWallApp;
 
+// Context menus and corrections, matching the WPF menus node for node.
 public sealed partial class MainWindow
 {
     private void OnTreeContextRequested(object? sender, ContextRequestedEventArgs e)
@@ -29,27 +29,56 @@ public sealed partial class MainWindow
         List<Control> items = [];
         if (node.Lap is { } lap)
         {
-            items.Add(Item("Use as reference lap", async () => await SetReferenceLapAsync(lap)));
-            items.Add(Item("Clear reference lap", () => ClearReference(), _reference is not null));
+            AddLapItems(items, lap);
         }
         else if (node.Session is { } session)
         {
-            items.Add(Item("Use fastest lap as reference", async () => await UseSessionFastestAsReferenceAsync(session)));
-            items.Add(Item("Edit session details…", async () => await EditSessionAsync(session)));
+            items.Add(Item("Use fastest lap as reference", async () => await UseFastestAsReferenceAsync([session])));
+            items.Add(Item("Session details…", async () => await EditSessionAsync(session)));
+            items.Add(CreateAssignVehicleMenu("Assign vehicle to this session", [], [session.SessionGuid], [session]));
+            items.Add(Item("Export…", async () =>
+                await ExportAsync([session], session.LocalStart.ToString("yyyy-MM-dd HH.mm"))));
+        }
+        else if (node.Date is { } date)
+        {
+            items.Add(Item("Use fastest lap as reference", async () => await UseFastestAsReferenceAsync(date.Sessions)));
+            items.Add(CreateAssignVehicleMenu(
+                "Assign vehicle to this date's sessions",
+                [],
+                date.Sessions.Select(session => session.SessionGuid).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+                date.Sessions));
+            items.Add(Item("Export…", async () => await ExportAsync(date.Sessions, date.Date.ToString("yyyy-MM-dd"))));
+        }
+        else if (node.Driver is { OptimalLap: { } optimal })
+        {
+            AddLapItems(items, optimal);
         }
         else if (node.Car is { } car)
         {
-            items.Add(CreateVehicleMenu(car));
+            var aliases = car.Sessions.Select(session => session.VehicleAlias)
+                .Where(alias => !string.IsNullOrWhiteSpace(alias))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            var sessionGuids = car.Sessions.Where(session => session.AiMData is not null)
+                .Select(session => session.SessionGuid)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            items.Add(CreateAssignVehicleMenu("Assign vehicle name", aliases, sessionGuids, car.Sessions));
         }
-        else if (node.Location is { } location && _model.GetAssignableLayouts(location) is { Count: > 0 } layouts)
+        else if (node.Location is { } location)
         {
-            var parent = new MenuItem { Header = "Choose layout" };
-            foreach (var layout in layouts)
+            if (_model.GetAssignableLayouts(location) is { Count: > 0 } layouts)
             {
-                parent.Items.Add(Item(layout, async () => await AssignLayout(location, layout)));
+                var parent = new MenuItem { Header = "Choose layout" };
+                foreach (var layout in layouts)
+                {
+                    parent.Items.Add(Item(layout, async () => await AssignLayout(location, layout)));
+                }
+
+                items.Add(parent);
             }
 
-            items.Add(parent);
+            AddCsvTrackItems(items, location);
         }
 
         if (items.Count == 0)
@@ -66,6 +95,12 @@ public sealed partial class MainWindow
         return menu;
     }
 
+    private void AddLapItems(List<Control> items, LapInfo lap)
+    {
+        items.Add(Item("Use as reference lap", async () => await SetReferenceLapAsync(lap)));
+        items.Add(Item("Clear reference lap", ClearReference, _referenceLap is not null));
+    }
+
     private static MenuItem Item(string header, Action action, bool enabled = true)
     {
         var item = new MenuItem { Header = header, IsEnabled = enabled };
@@ -73,32 +108,37 @@ public sealed partial class MainWindow
         return item;
     }
 
-    private MenuItem CreateVehicleMenu(TrackCarGroup car)
+    private MenuItem CreateAssignVehicleMenu(
+        string header, IReadOnlyList<string> aliases, IReadOnlyList<string> sessionGuids,
+        IReadOnlyList<SessionInfo> sessions)
     {
-        var aliases = car.Sessions.Select(session => session.VehicleAlias)
-            .Where(alias => !string.IsNullOrWhiteSpace(alias))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        var sessionGuids = car.Sessions.Where(session => session.AiMData is not null)
-            .Select(session => session.SessionGuid)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        var canAssign = aliases.Length > 0 || sessionGuids.Length > 0;
-        var parent = new MenuItem { Header = "Assign vehicle name", IsEnabled = canAssign };
-        foreach (var name in VehicleChoices())
+        var canAssign = aliases.Count > 0 || sessionGuids.Count > 0;
+        var parent = new MenuItem { Header = header };
+        foreach (var name in _model.Catalog.Names
+                     .Concat(_model.Settings.CustomVehicleNames)
+                     .Where(name => !string.IsNullOrWhiteSpace(name) && !_model.IsVehicleHidden(name))
+                     .Distinct(StringComparer.CurrentCultureIgnoreCase)
+                     .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase))
         {
-            parent.Items.Add(Item(name, async () => await AssignVehicleName(car, aliases, sessionGuids, name)));
+            parent.Items.Add(Item(name, async () => await AssignVehicleName(aliases, sessionGuids, name, sessions),
+                canAssign));
+        }
+
+        if (parent.Items.Count == 0)
+        {
+            parent.Items.Add(new MenuItem { Header = "No catalog vehicles available", IsEnabled = false });
         }
 
         parent.Items.Add(new Separator());
         parent.Items.Add(Item("Other name…", async () =>
         {
-            var name = await Dialogs.PromptAsync(this, "Assign vehicle name", "Vehicle name", car.Name);
+            var initial = sessions.Count > 0 ? _model.GetVehicleName(sessions[0]) : string.Empty;
+            var name = await Dialogs.PromptAsync(this, header, "Vehicle name", initial);
             if (!string.IsNullOrWhiteSpace(name))
             {
-                await AssignVehicleName(car, aliases, sessionGuids, name);
+                await AssignVehicleName(aliases, sessionGuids, name, sessions);
             }
-        }));
+        }, canAssign));
         return parent;
     }
 
@@ -152,7 +192,8 @@ public sealed partial class MainWindow
     }
 
     private async Task AssignVehicleName(
-        TrackCarGroup car, IReadOnlyList<string> aliases, IReadOnlyList<string> sessionGuids, string vehicleName)
+        IReadOnlyList<string> aliases, IReadOnlyList<string> sessionGuids, string vehicleName,
+        IReadOnlyList<SessionInfo> sessions)
     {
         var updated = SettingsStore.Clone(_model.Settings);
         foreach (var alias in aliases)
@@ -163,6 +204,15 @@ public sealed partial class MainWindow
         foreach (var guid in sessionGuids)
         {
             updated.SessionVehicleMappings[guid] = vehicleName;
+        }
+
+        // A car-level assignment applies through the alias, so drop per-session overrides it would hide.
+        if (aliases.Count > 0)
+        {
+            foreach (var session in sessions.Where(session => !string.IsNullOrWhiteSpace(session.VehicleAlias)))
+            {
+                updated.SessionVehicleMappings.Remove(session.SessionGuid);
+            }
         }
 
         updated.CustomVehicleNames = updated.CustomVehicleNames.Append(vehicleName)
@@ -178,7 +228,7 @@ public sealed partial class MainWindow
         await RebuildTreeAsync(true);
         if (SessionTree.SelectedItem is null)
         {
-            SelectNode(node => node.Car is { } group && group.Sessions.Any(session => car.Sessions.Contains(session)));
+            SelectNode(node => node.Car is { } group && group.Sessions.Any(sessions.Contains));
         }
 
         StatusText.Text = $"Assigned {vehicleName} to {aliases.Count + sessionGuids.Count} vehicle source(s).";
@@ -258,21 +308,25 @@ public sealed partial class MainWindow
             SelectNode(node => node.Session?.SessionGuid == session.SessionGuid);
         }
 
-        StatusText.Text = "Session details saved.";
+        UpdateLapCards();
+        StatusText.Text = "Session vehicle and conditions saved.";
     }
 
-    private async Task UseSessionFastestAsReferenceAsync(SessionInfo session)
+    // Session and date menus: the fastest driven lap across the given sessions becomes the reference.
+    private async Task UseFastestAsReferenceAsync(IReadOnlyList<SessionInfo> sessions)
     {
-        BeginLoading($"Reading laps from {session.FileName}");
+        BeginLoading($"Reading laps from {sessions[0].FileName}");
         try
         {
-            var laps = await Task.Run(() => TelemetryLoader.ReadLaps(session));
-            var fastest = laps.Where(lap => !lap.IsAverage && double.IsFinite(lap.DurationMs) && lap.DurationMs > 0)
-                .MinBy(lap => lap.DurationMs);
-            if (fastest is null)
+            var candidates = new List<LapInfo>();
+            foreach (var session in sessions)
             {
-                await Dialogs.ShowMessageAsync(this, "Reference lap unavailable",
-                    "No fastest driven lap was found in this session.");
+                candidates.AddRange(await GetLapsAsync(session));
+            }
+
+            if (FastestDrivenLap(candidates) is not { } fastest)
+            {
+                await Dialogs.ShowMessageAsync(this, "Reference lap unavailable", "No fastest driven lap was found.");
                 return;
             }
 
@@ -291,22 +345,35 @@ public sealed partial class MainWindow
 
     private async Task SetReferenceLapAsync(LapInfo lap)
     {
-        if (_primary is not null && _model.LocationOf(_primary.Session) != _model.LocationOf(lap.Session))
+        if (_primaryLap is not null && _model.LocationOf(_primaryLap.Session) != _model.LocationOf(lap.Session))
         {
             await Dialogs.ShowMessageAsync(this, "Reference must be from the same track",
                 "Choose a reference lap from the same track as the selected lap.");
             return;
         }
 
+        _referenceLap = lap;
+        ClearReferenceButton.IsEnabled = true;
+        UpdateLapCards();
+        if (_primaryLap is null)
+        {
+            return;
+        }
+
         BeginLoading($"Loading reference {lap.Session.FileName} · {lap.Label}");
         try
         {
-            _reference = await Task.Run(() => TelemetryLoader.ReadTrace(lap));
-            ClearReferenceButton.IsEnabled = true;
+            var trace = await Task.Run(() => TelemetryLoader.ReadTrace(lap));
+            if (_referenceLap != lap)
+            {
+                return;
+            }
+
+            _reference = trace;
             RefreshChart();
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
-                                           InvalidDataException or JsonException)
+                                           InvalidDataException or JsonException or ArgumentException)
         {
             StatusText.Text = $"Could not read reference lap: {exception.Message}";
         }
@@ -318,6 +385,7 @@ public sealed partial class MainWindow
 
     private void ClearReference()
     {
+        _referenceLap = null;
         _reference = null;
         ClearReferenceButton.IsEnabled = false;
         RefreshChart();
@@ -327,6 +395,7 @@ public sealed partial class MainWindow
     {
         if (_dataFolder is null)
         {
+            await Dialogs.ShowMessageAsync(this, "Settings", "Open a data folder first. Settings are saved beside the data.");
             return;
         }
 

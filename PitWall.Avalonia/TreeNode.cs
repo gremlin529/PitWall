@@ -5,14 +5,17 @@ using TrackTelemetryViewer;
 
 namespace PitWallApp;
 
+// One session-library row. Header text is split into Text + Suffix + Tail so the suffix (fastest/optimal time)
+// can be coloured independently, matching the WPF StackPanel headers.
 internal sealed class TreeNode : INotifyPropertyChanged
 {
     private bool _isExpanded;
     private IBrush _foreground = Palette.Text;
-    private IBrush _suffixForeground = Palette.Text;
+    private IBrush? _suffixForeground;
     private string _tail = string.Empty;
     private string _text;
     private string _suffix = string.Empty;
+    private bool _suffixIsLink;
 
     public TreeNode(string text) => _text = text;
 
@@ -25,8 +28,15 @@ internal sealed class TreeNode : INotifyPropertyChanged
     public IBrush Foreground
     {
         get => _foreground;
-        set { _foreground = value; Raise(nameof(Foreground)); }
+        set
+        {
+            _foreground = value;
+            Raise(nameof(Foreground));
+            Raise(nameof(EffectiveSuffixForeground));
+        }
     }
+
+    public FontWeight Weight { get; init; } = FontWeight.Normal;
 
     public string Suffix
     {
@@ -34,10 +44,25 @@ internal sealed class TreeNode : INotifyPropertyChanged
         set { _suffix = value; Raise(nameof(Suffix)); }
     }
 
-    public IBrush SuffixForeground
+    // Null means the suffix inherits the node's own foreground, as WPF header TextBlocks do.
+    public IBrush? SuffixForeground
     {
         get => _suffixForeground;
-        set { _suffixForeground = value; Raise(nameof(SuffixForeground)); }
+        set
+        {
+            _suffixForeground = value;
+            Raise(nameof(SuffixForeground));
+            Raise(nameof(EffectiveSuffixForeground));
+        }
+    }
+
+    public IBrush EffectiveSuffixForeground => _suffixForeground ?? _foreground;
+
+    // True for a session's fastest-lap time, which loads that lap when clicked.
+    public bool SuffixIsLink
+    {
+        get => _suffixIsLink;
+        set { _suffixIsLink = value; Raise(nameof(SuffixIsLink)); }
     }
 
     // Text after the suffix, drawn in the node's own foreground (e.g. "(wet)").
@@ -48,7 +73,6 @@ internal sealed class TreeNode : INotifyPropertyChanged
     }
 
     public string? Key { get; set; }
-    public IReadOnlyList<SessionInfo>? DateSessions { get; init; }
 
     public ObservableCollection<TreeNode> Children { get; } = [];
     public SessionInfo? Session { get; init; }
@@ -56,6 +80,10 @@ internal sealed class TreeNode : INotifyPropertyChanged
     public TrackLocation? Location { get; init; }
     public TrackCarGroup? Car { get; init; }
     public TrackDriverGroup? Driver { get; init; }
+    public TrackDateGroup? Date { get; init; }
+
+    // For date and session nodes: every session of the driver the node belongs to.
+    public IReadOnlyList<SessionInfo>? DriverSessions { get; init; }
 
     // Invoked the first time the node is expanded, to load children on demand.
     public Func<TreeNode, Task>? LoadChildren { get; set; }
@@ -74,12 +102,22 @@ internal sealed class TreeNode : INotifyPropertyChanged
 
             _isExpanded = value;
             Raise(nameof(IsExpanded));
-            if (value && LoadChildren is { } load)
+            if (value)
             {
-                LoadChildren = null;
-                LoadTask = load(this);
+                EnsureChildrenLoaded();
             }
         }
+    }
+
+    public Task EnsureChildrenLoaded()
+    {
+        if (LoadChildren is { } load)
+        {
+            LoadChildren = null;
+            LoadTask = load(this);
+        }
+
+        return LoadTask;
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

@@ -3,6 +3,7 @@
     <OutputType>WinExe</OutputType>
     <AssemblyName>PitWall</AssemblyName>
     <RootNamespace>PitWallApp</RootNamespace>
+    <Version>0.2.1</Version>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -21,11 +22,20 @@
     <PackageReference Include="Tmds.DBus.Protocol" Version="0.21.3" />
   </ItemGroup>
 
+  <ItemGroup>
+    <AvaloniaResource Include="..\Assets\PitwallLogo.png" Link="Assets\PitwallLogo.png" />
+  </ItemGroup>
+
   <!-- Platform-neutral parsing and models shared with the WPF app. -->
   <ItemGroup>
     <Compile Include="..\TelemetryLoader.cs" Link="Shared\TelemetryLoader.cs" />
     <Compile Include="..\VboReader.cs" Link="Shared\VboReader.cs" />
     <Compile Include="..\TelemetryModels.cs" Link="Shared\TelemetryModels.cs" />
+    <Compile Include="..\AimCsvReader.cs" Link="Shared\AimCsvReader.cs" />
+    <Compile Include="..\AimCsvAlignment.cs" Link="Shared\AimCsvAlignment.cs" />
+    <Compile Include="..\TrackProfileCache.cs" Link="Shared\TrackProfileCache.cs" />
+    <Compile Include="..\PitWallPackage.cs" Link="Shared\PitWallPackage.cs" />
+    <Compile Include="..\XrkWriter.cs" Link="Shared\XrkWriter.cs" />
   </ItemGroup>
 
   <!-- XRK helper: built by ..\XrkReader\build.sh (macOS/Linux); Windows reuses the existing exe. -->

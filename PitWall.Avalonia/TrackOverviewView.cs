@@ -7,85 +7,49 @@ using TrackTelemetryViewer;
 
 namespace PitWallApp;
 
-/// <summary>Draws a track meanline, mirroring the WPF TrackMap's meanline-only mode.</summary>
-internal sealed class MeanlineView : Control
-{
-    private static readonly IBrush Background = new SolidColorBrush(Color.Parse("#1A222B"));
-    private static readonly IBrush LineBrush = new SolidColorBrush(Color.Parse("#20B2AA"));
-    private IReadOnlyList<TrackPoint> _points = [];
-
-    public void SetPoints(IReadOnlyList<TrackPoint> points)
-    {
-        _points = points;
-        InvalidateVisual();
-    }
-
-    public override void Render(DrawingContext context)
-    {
-        base.Render(context);
-        context.FillRectangle(Background, new Rect(Bounds.Size));
-        var points = _points.Where(point => double.IsFinite(point.Latitude) && double.IsFinite(point.Longitude))
-            .ToArray();
-        if (points.Length < 2)
-        {
-            TraceView.DrawText(context, "Track map unavailable", new Point(16, 18), 12);
-            return;
-        }
-
-        TraceView.DrawText(context, "TRACK MEANLINE", new Point(14, 12), 9);
-        var minLat = points.Min(point => point.Latitude);
-        var maxLat = points.Max(point => point.Latitude);
-        var minLon = points.Min(point => point.Longitude);
-        var maxLon = points.Max(point => point.Longitude);
-        var lonScale = Math.Max(0.01, Math.Cos((minLat + maxLat) / 2 * Math.PI / 180));
-        var spanX = Math.Max((maxLon - minLon) * lonScale, 1e-6);
-        var spanY = Math.Max(maxLat - minLat, 1e-6);
-        var area = new Rect(24, 36, Math.Max(1, Bounds.Width - 48), Math.Max(1, Bounds.Height - 64));
-        var scale = Math.Min(area.Width / spanX, area.Height / spanY);
-        var left = area.X + (area.Width - spanX * scale) / 2;
-        var top = area.Y + (area.Height - spanY * scale) / 2;
-        TraceView.DrawPolyline(context,
-            points.Select(point => (new Point(
-                left + (point.Longitude - minLon) * lonScale * scale,
-                top + (maxLat - point.Latitude) * scale), true)),
-            new Pen(LineBrush, 3, lineCap: PenLineCap.Round, lineJoin: PenLineJoin.Round));
-    }
-}
-
-/// <summary>Track summary page: title, statistics, meanline map and per-driver fastest/optimal lap links.</summary>
+/// <summary>Track summary page, laid out like the WPF TrackOverviewPanel: 3D meanline map, statistics and lap links.</summary>
 internal sealed class TrackOverviewView : Grid
 {
-    private static readonly IBrush Muted = new SolidColorBrush(Color.Parse("#94A0AD"));
-    private static readonly IBrush Panel = new SolidColorBrush(Color.Parse("#1A222B"));
-    private static readonly IBrush Fastest = new SolidColorBrush(Color.Parse("#81C784"));
-    private static readonly IBrush Optimal = new SolidColorBrush(Color.Parse("#CE93D8"));
+    private static readonly IBrush RowBorder = new SolidColorBrush(Color.Parse("#2B3641"));
+    private static readonly IBrush DriverText = new SolidColorBrush(Color.Parse("#E8EDF2"));
 
-    private readonly TextBlock _title = new() { FontSize = 21, FontWeight = FontWeight.SemiBold };
-    private readonly TextBlock _subtitle = new() { Foreground = Muted, FontSize = 11, Margin = new Thickness(0, 3, 0, 0) };
-    private readonly TextBlock _vehicles = StatValue();
-    private readonly TextBlock _sessions = StatValue();
-    private readonly TextBlock _laps = StatValue();
-    private readonly TextBlock _length = StatValue();
-    private readonly TextBlock _status = new() { Foreground = Muted, FontSize = 11, TextWrapping = TextWrapping.Wrap };
-    private readonly MeanlineView _map = new();
+    private readonly TextBlock _title = new() { FontSize = 22, FontWeight = FontWeight.SemiBold, Text = "Track overview" };
+    private readonly TextBlock _subtitle = new() { Foreground = Palette.Muted, FontSize = 11, Margin = new Thickness(0, 3, 0, 0) };
+    private readonly TextBlock _vehicles = StatValue("—");
+    private readonly TextBlock _sessions = StatValue("—");
+    private readonly TextBlock _laps = StatValue("Counting…");
+    private readonly TextBlock _length = StatValue("—");
+    private readonly TextBlock _status = new()
+    {
+        Foreground = Palette.Muted,
+        FontSize = 10,
+        Margin = new Thickness(3, 10, 0, 0),
+        Text = "Select a track or car to view its overview."
+    };
+    private readonly TrackMap _map = new() { Enable3DOverview = true };
     private readonly StackPanel _drivers = new();
 
     public TrackOverviewView()
     {
-        Margin = new Thickness(8);
-        RowDefinitions = new RowDefinitions("Auto,*");
-        Children.Add(new StackPanel { Margin = new Thickness(2, 0, 2, 12), Children = { _title, _subtitle } });
+        RowDefinitions = new RowDefinitions("Auto,*,Auto");
+        Children.Add(new StackPanel { Margin = new Thickness(2, 0, 2, 14), Children = { _title, _subtitle } });
 
-        var body = new Grid { ColumnDefinitions = new ColumnDefinitions("3*,12,4*") };
+        var body = new Grid { ColumnDefinitions = new ColumnDefinitions("1.55*,14,0.85*") };
         SetRow(body, 1);
         Children.Add(body);
-        body.Children.Add(new Border { CornerRadius = new CornerRadius(8), ClipToBounds = true, Child = _map });
+        body.Children.Add(new Border
+        {
+            Background = Palette.Panel,
+            CornerRadius = new CornerRadius(10),
+            ClipToBounds = true,
+            Child = _map
+        });
 
         var stats = new UniformGrid { Columns = 2, Rows = 2 };
-        stats.Children.Add(Tile("VEHICLES", _vehicles));
-        stats.Children.Add(Tile("SESSIONS", _sessions));
-        stats.Children.Add(Tile("LAPS", _laps));
-        stats.Children.Add(Tile("TRACK LENGTH", _length));
+        stats.Children.Add(Tile("VEHICLES", _vehicles, new Thickness(0, 0, 6, 6)));
+        stats.Children.Add(Tile("SESSIONS", _sessions, new Thickness(6, 0, 0, 6)));
+        stats.Children.Add(Tile("LAPS", _laps, new Thickness(0, 6, 6, 0)));
+        stats.Children.Add(Tile("TRACK LENGTH", _length, new Thickness(6, 6, 0, 0)));
         var right = new DockPanel();
         SetColumn(right, 2);
         var top = new StackPanel
@@ -94,7 +58,6 @@ internal sealed class TrackOverviewView : Grid
             {
                 Caption("TRACK INTELLIGENCE", new Thickness(3, 3, 0, 10)),
                 stats,
-                _status,
                 Caption("CARS & DRIVERS", new Thickness(3, 16, 0, 8))
             }
         };
@@ -102,11 +65,17 @@ internal sealed class TrackOverviewView : Grid
         right.Children.Add(top);
         right.Children.Add(new Border
         {
-            Background = Panel,
-            CornerRadius = new CornerRadius(8),
-            Child = new ScrollViewer { Content = _drivers }
+            Background = Palette.Panel,
+            Child = new ScrollViewer
+            {
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                Content = _drivers
+            }
         });
         body.Children.Add(right);
+
+        SetRow(_status, 2);
+        Children.Add(_status);
     }
 
     public event Action<LapNavigationTarget>? LapLinkClicked;
@@ -117,9 +86,12 @@ internal sealed class TrackOverviewView : Grid
         _subtitle.Text = subtitle;
     }
 
-    public void SetSubtitle(string subtitle) => _subtitle.Text = subtitle;
-
-    public void SetMeanline(IReadOnlyList<TrackPoint> points) => _map.SetPoints(points);
+    public void SetMap(IReadOnlyList<TrackPoint> points, TrackSegmentMap? segments)
+    {
+        _map.SegmentMap = segments;
+        _map.MeanlinePoints = points;
+        _map.Traces = [];
+    }
 
     public void SetStats(string vehicles, string sessions, string laps, string length, string status)
     {
@@ -140,10 +112,13 @@ internal sealed class TrackOverviewView : Grid
         foreach (var row in rows)
         {
             var title = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), Margin = new Thickness(0, 0, 0, 6) };
-            title.Children.Add(new TextBlock { Text = row.DriverName, FontSize = 12, FontWeight = FontWeight.SemiBold });
+            title.Children.Add(new TextBlock
+            {
+                Text = row.DriverName, FontSize = 12, FontWeight = FontWeight.SemiBold, Foreground = DriverText
+            });
             var laps = new TextBlock
             {
-                Text = $"{row.Laps} laps", FontSize = 10, Foreground = Muted, VerticalAlignment = VerticalAlignment.Center
+                Text = $"{row.Laps} laps", FontSize = 10, Foreground = Palette.Muted, VerticalAlignment = VerticalAlignment.Center
             };
             SetColumn(laps, 1);
             title.Children.Add(laps);
@@ -156,20 +131,24 @@ internal sealed class TrackOverviewView : Grid
                     VerticalAlignment = VerticalAlignment.Center,
                     Children =
                     {
-                        new TextBlock { Text = car.VehicleName, FontSize = 10, Foreground = new SolidColorBrush(Color.Parse("#4FC3F7")) },
-                        new TextBlock { Text = $"{car.Sessions} sessions", FontSize = 9, Foreground = Muted }
+                        new TextBlock { Text = car.VehicleName, FontSize = 10, Foreground = Palette.Accent },
+                        new TextBlock
+                        {
+                            Text = $"{car.Sessions} sessions · {car.Laps} laps", FontSize = 9, Foreground = Palette.Muted
+                        }
                     }
                 };
                 var links = new StackPanel
                 {
                     VerticalAlignment = VerticalAlignment.Center,
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
                     Children =
                     {
-                        Link(car.FastestLapLabel, car.FastestLap, car.FastestLapToolTip, Fastest),
-                        Link(car.OptimalLapLabel, car.OptimalLap, car.OptimalLapToolTip, Optimal)
+                        Link(car.FastestLapLabel, car.FastestLap, car.FastestLapToolTip, Palette.Fastest, 0),
+                        Link(car.OptimalLapLabel, car.OptimalLap, car.OptimalLapToolTip, Palette.Optimal, 2)
                     }
                 };
-                var line = new Grid { ColumnDefinitions = new ColumnDefinitions("*,170"), Margin = new Thickness(8, 3, 0, 3) };
+                var line = new Grid { ColumnDefinitions = new ColumnDefinitions("*,160"), Margin = new Thickness(8, 3, 0, 3) };
                 SetColumn(links, 1);
                 line.Children.Add(info);
                 line.Children.Add(links);
@@ -178,7 +157,7 @@ internal sealed class TrackOverviewView : Grid
 
             _drivers.Children.Add(new Border
             {
-                BorderBrush = new SolidColorBrush(Color.Parse("#2B3641")),
+                BorderBrush = RowBorder,
                 BorderThickness = new Thickness(0, 0, 0, 1),
                 Padding = new Thickness(8, 7),
                 Child = block
@@ -186,17 +165,30 @@ internal sealed class TrackOverviewView : Grid
         }
     }
 
-    private Button Link(string label, LapNavigationTarget? target, string? tip, IBrush brush)
+    private Button Link(string label, LapNavigationTarget? target, string? tip, IBrush brush, double topMargin)
     {
         var button = new Button
         {
             Content = label,
             Foreground = brush,
             Background = Brushes.Transparent,
-            Padding = new Thickness(6, 2),
-            FontSize = 11,
-            IsEnabled = target is not null
+            BorderThickness = new Thickness(0),
+            Padding = new Thickness(0),
+            Margin = new Thickness(0, topMargin, 0, 0),
+            MinHeight = 0,
+            FontSize = 9,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Right,
+            IsEnabled = target is not null,
+            Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand)
         };
+        // Keep the link colour on hover/press instead of the Fluent button foreground.
+        button.Resources["ButtonForegroundPointerOver"] = brush;
+        button.Resources["ButtonForegroundPressed"] = brush;
+        button.Resources["ButtonForegroundDisabled"] = brush;
+        button.Resources["ButtonBackgroundPointerOver"] = Brushes.Transparent;
+        button.Resources["ButtonBackgroundPressed"] = Brushes.Transparent;
+        button.Resources["ButtonBackgroundDisabled"] = Brushes.Transparent;
         if (tip is not null)
         {
             ToolTip.SetTip(button, tip);
@@ -212,17 +204,24 @@ internal sealed class TrackOverviewView : Grid
         return button;
     }
 
-    private static TextBlock StatValue() => new() { FontSize = 23, FontWeight = FontWeight.SemiBold, Text = "—" };
+    private static TextBlock StatValue(string text) => new() { FontSize = 23, FontWeight = FontWeight.SemiBold, Text = text, Margin = new Thickness(0, 5, 0, 0) };
 
     private static TextBlock Caption(string text, Thickness margin) =>
-        new() { Text = text, FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Muted, Margin = margin };
+        new() { Text = text, FontSize = 10, FontWeight = FontWeight.Bold, Foreground = Palette.Muted, Margin = margin };
 
-    private static Border Tile(string caption, TextBlock value) => new()
+    private static Border Tile(string caption, TextBlock value, Thickness margin) => new()
     {
-        Background = Panel,
+        Background = Palette.Panel,
         CornerRadius = new CornerRadius(8),
         Padding = new Thickness(13),
-        Margin = new Thickness(3),
-        Child = new StackPanel { Children = { Caption(caption, new Thickness(0, 0, 0, 5)), value } }
+        Margin = margin,
+        Child = new StackPanel
+        {
+            Children =
+            {
+                new TextBlock { Text = caption, FontSize = 9, FontWeight = FontWeight.Bold, Foreground = Palette.Muted },
+                value
+            }
+        }
     };
 }

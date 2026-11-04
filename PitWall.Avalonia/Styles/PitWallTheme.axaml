@@ -174,8 +174,13 @@
     <Setter Property="Padding" Value="3" />
   </Style>
   <Style Selector="TreeViewItem">
-    <Setter Property="Padding" Value="3,2" />
+    <Setter Property="Padding" Value="3,4" />
     <Setter Property="MinHeight" Value="26" />
+  </Style>
+  <!-- A session's fastest-lap time in the tree loads that lap when clicked. -->
+  <Style Selector="TextBlock.suffix.link">
+    <Setter Property="Cursor" Value="Hand" />
+    <Setter Property="ToolTip.Tip" Value="Load the fastest lap" />
   </Style>
   <Style Selector="TreeViewItem /template/ Border#PART_LayoutRoot">
     <Setter Property="CornerRadius" Value="4" />

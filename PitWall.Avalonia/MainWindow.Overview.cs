@@ -20,36 +20,6 @@ public sealed partial class MainWindow
         ? $"{distanceM / 1609.344:0.00} mi"
         : $"{distanceM / 1000:0.00} km";
 
-    private static string FormatLapTime(double durationMs)
-    {
-        var time = TimeSpan.FromMilliseconds(durationMs);
-        return $"{(int)time.TotalMinutes}:{time.Seconds:00}.{time.Milliseconds:000}";
-    }
-
-    private void ApplySessionHeader(TreeNode node, SessionInfo session)
-    {
-        node.Text = $"{session.SessionLabel}  ·  {_model.GetSessionEdits(session).RaceType}";
-        if (_fastestLapMs.TryGetValue(session.FilePath, out var fastest))
-        {
-            node.Suffix = $"  ({FormatLapTime(fastest)})";
-            node.SuffixForeground = Palette.Fastest;
-        }
-
-        node.Tail = _model.IsWet(session) ? "  (wet)" : string.Empty;
-    }
-
-    private void ApplyDateHeader(TreeNode node, DateTime date)
-    {
-        node.Text = date.ToString("ddd, MMM d, yyyy");
-        var fastest = (node.DateSessions ?? [])
-            .Where(session => _fastestLapMs.ContainsKey(session.FilePath))
-            .Select(session => _fastestLapMs[session.FilePath])
-            .DefaultIfEmpty(double.PositiveInfinity)
-            .Min();
-        node.Suffix = double.IsFinite(fastest) ? $"  ·  Fastest {FormatLapTime(fastest)}" : string.Empty;
-        node.SuffixForeground = Palette.Fastest;
-    }
-
     private void ShowDataPanel()
     {
         _overviewGeneration++;
@@ -72,19 +42,19 @@ public sealed partial class MainWindow
             return;
         }
 
-        var length = location.LengthM > 0 ? FormatTrackLength(location.LengthM) : null;
         var visibleCount = location.Sessions.Count(session => !_model.IsVehicleHidden(_model.GetVehicleName(session)));
         Overview.SetHeader(
             _overviewGroup is null ? location.DisplayName : $"{location.DisplayName}  /  {_overviewGroup}",
-            $"{location.DisplayName}{(length is null ? string.Empty : $" · {length}")} · {visibleCount} sessions at " +
+            $"{location.DisplayName} · {FormatTrackLength(location.LengthM)} · {visibleCount} sessions at " +
             FormattableString.Invariant($"{location.Latitude:F5}, {location.Longitude:F5}"));
-        Overview.SetLength(length ?? "—");
+        Overview.SetLength(location.LengthM > 0 ? FormatTrackLength(location.LengthM) : "—");
     }
 
     private async Task ShowTrackOverviewAsync(
         TrackLocation location, IReadOnlyList<SessionInfo>? scope, string? groupName)
     {
         var generation = ++_overviewGeneration;
+        _primaryLap = null;
         DataPanel.IsVisible = false;
         Overview.IsVisible = true;
         var sessions = (scope ?? location.Sessions)
@@ -95,13 +65,11 @@ public sealed partial class MainWindow
         _overviewGroup = groupName;
         UpdateOverviewLabels();
         Overview.SetDrivers([]);
-        Overview.SetMeanline([]);
         Overview.SetStats(
             sessions.Select(_model.GetVehicleName).Distinct(StringComparer.CurrentCultureIgnoreCase).Count().ToString("N0"),
             sessions.Length.ToString("N0"), "Counting…",
             location.LengthM > 0 ? FormatTrackLength(location.LengthM) : "—",
             "Loading the reference line and session statistics…");
-        StatusText.Text = $"Loading {location.DisplayName}…";
         BeginLoading($"Loading {location.DisplayName}");
 
         try
@@ -111,18 +79,15 @@ public sealed partial class MainWindow
             {
                 if (!_meanlineCache.TryGetValue(path, out meanline!))
                 {
-                    try
-                    {
-                        meanline = await Task.Run(() => TelemetryLoader.ReadMeanlinePoints(path));
-                    }
-                    catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
-                                                       JsonException or InvalidDataException)
-                    {
-                        meanline = [];
-                    }
-
+                    meanline = await Task.Run(() => TelemetryLoader.ReadMeanlinePoints(path));
                     _meanlineCache[path] = meanline;
                 }
+            }
+
+            if (meanline.Count == 0)
+            {
+                // Logger-only venues have no meanline: build a profile from the sessions' own GPS (cached on disk).
+                meanline = await Task.Run(() => TrackProfileCache.GetOrBuild(sessions));
             }
 
             if (generation != _overviewGeneration)
@@ -130,15 +95,21 @@ public sealed partial class MainWindow
                 return;
             }
 
-            Overview.SetMeanline(meanline);
+            var segments = await LoadSegmentMapAsync(location.MeanlinePath);
+            if (generation != _overviewGeneration)
+            {
+                return;
+            }
+
+            Overview.SetMap(meanline, segments);
             var finished = false;
             var progress = new Progress<int>(completed =>
             {
                 if (generation == _overviewGeneration && !finished)
                 {
-                    var detail = $"Counting laps from session files… {completed:N0}/{location.Sessions.Count:N0}";
-                    Overview.SetStatus(detail);
-                    UpdateLoadingDetail($"{location.DisplayName}: {detail}");
+                    Overview.SetStatus($"Counting laps from session files… {completed:N0}/{location.Sessions.Count:N0}");
+                    UpdateLoadingDetail(
+                        $"Counting laps · {location.DisplayName} · {completed:N0}/{location.Sessions.Count:N0}");
                 }
             });
             var failures = await CountLapsAsync(location.Sessions, progress);
@@ -159,7 +130,8 @@ public sealed partial class MainWindow
             if (generation == _overviewGeneration)
             {
                 Overview.SetStats("—", "—", "Unavailable", "—", "Track data could not be fully loaded.");
-                StatusText.Text = $"Could not load track overview: {exception.Message}";
+                StatusText.Text = "Could not load track overview.";
+                await Dialogs.ShowMessageAsync(this, "Track overview could not be loaded", exception.Message);
             }
         }
         finally
@@ -205,7 +177,6 @@ public sealed partial class MainWindow
 
         var sessions = _overviewSessions;
         int LapsOf(SessionInfo session) => _lapCounts.TryGetValue(session.FilePath, out var count) ? count : 0;
-        var countingDone = location.Sessions.All(session => _lapCounts.ContainsKey(session.FilePath));
         var vehicleCount = sessions.Select(_model.GetVehicleName).Distinct(StringComparer.CurrentCultureIgnoreCase).Count();
         var rows = sessions.GroupBy(_model.GetDriverName, StringComparer.CurrentCultureIgnoreCase)
             .OrderBy(group => group.Key, StringComparer.CurrentCultureIgnoreCase)
@@ -218,13 +189,12 @@ public sealed partial class MainWindow
                         var carSessions = carGroup.ToArray();
                         var fastest = carSessions.Where(session => _fastestLapMs.ContainsKey(session.FilePath))
                             .MinBy(session => _fastestLapMs[session.FilePath]);
-                        var optimal = carSessions.Select(TelemetryLoader.CreateOptimalLap).OfType<LapInfo>()
-                            .Where(lap => double.IsFinite(lap.DurationMs) && lap.DurationMs > 0)
-                            .MinBy(lap => lap.DurationMs);
+                        var optimal = BestOptimalLap(carSessions);
                         return new TrackCarStats(
                             carGroup.Key, carSessions.Length,
                             fastest is null ? null : new LapNavigationTarget(fastest, _fastestLapMs[fastest.FilePath], false),
-                            optimal is null ? null : new LapNavigationTarget(optimal.Session, optimal.DurationMs, true));
+                            optimal is null ? null : new LapNavigationTarget(optimal.Session, optimal.DurationMs, true),
+                            carSessions.Sum(LapsOf));
                     })
                     .ToArray();
                 return new TrackDriverStats(driverGroup.Key, driverGroup.Sum(LapsOf).ToString("N0"), cars);
@@ -233,13 +203,14 @@ public sealed partial class MainWindow
         Overview.SetDrivers(rows);
         Overview.SetStats(
             vehicleCount.ToString("N0"), sessions.Count.ToString("N0"),
-            countingDone || sessions.All(session => _lapCounts.ContainsKey(session.FilePath))
+            sessions.All(session => _lapCounts.ContainsKey(session.FilePath))
                 ? sessions.Sum(LapsOf).ToString("N0")
                 : "Counting…",
             location.LengthM > 0 ? FormatTrackLength(location.LengthM) : "—",
             $"{location.DisplayName} · {sessions.Count:N0} sessions · {vehicleCount:N0} vehicles");
     }
 
+    // Reads every session's fastest lap in the background so date and session headers fill in (WPF LoadFastestLapHeadersAsync).
     private void StartFastestLapLoad()
     {
         if (_fastestRunning)
@@ -258,14 +229,14 @@ public sealed partial class MainWindow
         _ = Task.Run(() =>
         {
             var batch = new List<(SessionInfo Session, double DurationMs)>();
-            var failures = 0;
+            var failures = new List<string>();
             var clock = Stopwatch.StartNew();
 
             void Flush(bool final)
             {
                 var items = batch.ToArray();
                 batch.Clear();
-                var failed = failures;
+                var failed = failures.ToArray();
                 Dispatcher.UIThread.Post(() => ApplyFastestLaps(generation, items, failed, final));
                 clock.Restart();
             }
@@ -290,7 +261,7 @@ public sealed partial class MainWindow
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
                                                    JsonException or InvalidDataException or ArgumentException)
                 {
-                    failures++;
+                    failures.Add($"{session.FileName}: {exception.Message}");
                 }
 
                 if (clock.ElapsedMilliseconds > 250)
@@ -304,7 +275,8 @@ public sealed partial class MainWindow
     }
 
     private void ApplyFastestLaps(
-        int generation, IReadOnlyList<(SessionInfo Session, double DurationMs)> items, int failures, bool final)
+        int generation, IReadOnlyList<(SessionInfo Session, double DurationMs)> items, IReadOnlyList<string> failures,
+        bool final)
     {
         if (final)
         {
@@ -321,17 +293,18 @@ public sealed partial class MainWindow
             return;
         }
 
+        var drivers = new HashSet<TreeNode>();
         foreach (var (session, duration) in items)
         {
-            _fastestLapMs[session.FilePath] = duration;
-            if (_sessionNodes.TryGetValue(session.FilePath, out var node))
+            // A lap list that has already been read is authoritative.
+            if (!_lapsBySession.ContainsKey(session.FilePath))
             {
-                ApplySessionHeader(node, session);
+                _fastestLapMs[session.FilePath] = duration;
             }
 
-            if (_dateNodes.TryGetValue(session.FilePath, out var dateNode))
+            if (_driverNodes.TryGetValue(session.FilePath, out var driverNode) && drivers.Add(driverNode))
             {
-                ApplyDateHeader(dateNode, session.LocalStart.Date);
+                UpdateDriverHeaders(session);
             }
         }
 
@@ -341,9 +314,10 @@ public sealed partial class MainWindow
             UpdateTrackStatistics();
         }
 
-        if (final && failures > 0)
+        if (final && failures.Count > 0)
         {
-            StatusText.Text = $"Fastest-lap times could not be read for {failures} sessions.";
+            _ = Dialogs.ShowMessageAsync(this, "Some fastest-lap times are unavailable",
+                $"Fastest-lap summaries could not be read for {failures.Count} sessions. The first error was: {failures[0]}");
         }
     }
 
@@ -352,7 +326,7 @@ public sealed partial class MainWindow
         if (!_sessionNodes.TryGetValue(target.Session.FilePath, out var sessionNode) ||
             FindPath(node => node == sessionNode) is not { } route)
         {
-            StatusText.Text = "The source session is no longer in the current library.";
+            await Dialogs.ShowMessageAsync(this, "Lap is unavailable", "The source session is no longer in the current library.");
             return;
         }
 
@@ -361,7 +335,7 @@ public sealed partial class MainWindow
             node.IsExpanded = true;
         }
 
-        await sessionNode.LoadTask;
+        await sessionNode.EnsureChildrenLoaded();
         var lapNodes = sessionNode.Children.Where(child => child.Lap is not null).ToArray();
         var lapNode = target.IsOptimal
             ? lapNodes.FirstOrDefault(child => child.Lap!.IsOptimal)
@@ -369,7 +343,7 @@ public sealed partial class MainWindow
                 .MinBy(child => child.Lap!.DurationMs);
         if (lapNode is null)
         {
-            StatusText.Text = "No matching lap telemetry was found for this session.";
+            await Dialogs.ShowMessageAsync(this, "Lap is unavailable", "No matching lap telemetry was found for this session.");
             return;
         }
 

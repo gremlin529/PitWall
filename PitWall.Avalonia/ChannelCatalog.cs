@@ -102,13 +102,13 @@ internal static class ChannelCatalog
 
     public static string PanelTitle(ChartChannelSetting channel) => channel.Key switch
     {
-        "speed" => "Speed",
-        "combined-g" => "G-force (lateral solid, longitudinal dashed)",
-        "longitudinal-g" => "Longitudinal G",
-        "lateral-g" => "Lateral G",
-        "delta-time" => "Time delta (A − B)",
+        "speed" => "SPEED",
+        "combined-g" => "G-FORCE",
+        "longitudinal-g" => "LONGITUDINAL G",
+        "lateral-g" => "LATERAL G",
+        "delta-time" => "TIME DELTA  ·  A − B",
         _ => channel.Key.StartsWith(AimPrefix, StringComparison.OrdinalIgnoreCase)
-            ? AimLabel(channel.Key[AimPrefix.Length..])
+            ? AimLabel(channel.Key[AimPrefix.Length..]).ToUpperInvariant()
             : channel.Name
     };
 }

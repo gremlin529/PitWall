@@ -36,6 +36,64 @@ public sealed partial class MainWindow
         }
     }
 
+    private sealed record WindowPlacement(double Left, double Top, double Width, double Height, bool Maximized);
+
+    private static string WindowPlacementPath => Path.Combine(UserFolder, "window-placement-avalonia.json");
+
+    // Same idea as the WPF RestoreWindowPlacement; a separate file because Avalonia positions are in pixels.
+    private void RestoreWindowPlacement()
+    {
+        try
+        {
+            if (!File.Exists(WindowPlacementPath) ||
+                System.Text.Json.JsonSerializer.Deserialize<WindowPlacement>(File.ReadAllText(WindowPlacementPath))
+                    is not { } placement ||
+                !new[] { placement.Left, placement.Top, placement.Width, placement.Height }.All(double.IsFinite) ||
+                placement.Width < MinWidth || placement.Height < MinHeight)
+            {
+                return;
+            }
+
+            var bounds = new PixelRect((int)placement.Left, (int)placement.Top, 1, 1);
+            if (Screens?.All is not { Count: > 0 } screens || !screens.Any(screen => screen.WorkingArea.Intersects(new PixelRect(
+                    bounds.X, bounds.Y, 100, 60))))
+            {
+                return;
+            }
+
+            WindowStartupLocation = WindowStartupLocation.Manual;
+            Position = new PixelPoint(bounds.X, bounds.Y);
+            Width = placement.Width;
+            Height = placement.Height;
+            if (placement.Maximized)
+            {
+                WindowState = WindowState.Maximized;
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                           System.Text.Json.JsonException)
+        {
+        }
+    }
+
+    private void SaveWindowPlacement()
+    {
+        try
+        {
+            if (WindowState == WindowState.Minimized)
+            {
+                return;
+            }
+
+            Directory.CreateDirectory(UserFolder);
+            File.WriteAllText(WindowPlacementPath, System.Text.Json.JsonSerializer.Serialize(new WindowPlacement(
+                Position.X, Position.Y, Width, Height, WindowState == WindowState.Maximized)));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+        }
+    }
+
     private static void CollectExpanded(IEnumerable<TreeNode> nodes, HashSet<string> keys)
     {
         foreach (var node in nodes)

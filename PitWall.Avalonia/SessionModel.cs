@@ -4,6 +4,14 @@ using TrackTelemetryViewer;
 
 namespace PitWallApp;
 
+internal sealed record CsvVenueAssignment(
+    string TrackName,
+    string Configuration,
+    double Latitude,
+    double Longitude,
+    AimCsvTransform? Transform,
+    int Version = 4);
+
 // Venue grouping and name resolution ported from the WPF MainWindow so both apps read the same settings files.
 internal sealed class SessionModel
 {
@@ -12,17 +20,22 @@ internal sealed class SessionModel
     public const string UseSourceLayout = "__use_source_layout__";
     public const string LayoutUnspecifiedLabel = "Layout unspecified";
 
+    private const string CsvVenueKeyPrefix = "venue:";
+    private const int CsvAssignmentVersion = 4;
+    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+
     private readonly Dictionary<string, TrackLocation> _trackBySession = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<TrackLocation> _locations = [];
+    private readonly List<SessionInfo> _sessions;
 
     public SessionModel(
-        IReadOnlyList<SessionInfo> sessions,
+        IEnumerable<SessionInfo> sessions,
         ViewerSettings settings,
         VehicleCatalog catalog,
         IReadOnlyDictionary<string, string> driverNames,
         Dictionary<string, SessionEdits> edits)
     {
-        Sessions = sessions;
+        _sessions = sessions.ToList();
         Settings = settings;
         Catalog = catalog;
         DriverNames = driverNames;
@@ -30,22 +43,108 @@ internal sealed class SessionModel
         BuildTrackLocations();
     }
 
-    public IReadOnlyList<SessionInfo> Sessions { get; }
+    public IReadOnlyList<SessionInfo> Sessions => _sessions;
     public ViewerSettings Settings { get; set; }
     public VehicleCatalog Catalog { get; }
     public IReadOnlyDictionary<string, string> DriverNames { get; }
     public Dictionary<string, SessionEdits> Edits { get; }
     public IReadOnlyList<TrackLocation> Locations => _locations;
 
+    // CSV sessions as read from disk, before a track assignment overlays them onto another venue.
+    public Dictionary<string, SessionInfo> CsvOriginals { get; } = new(StringComparer.OrdinalIgnoreCase);
+
     public TrackLocation? LocationOf(SessionInfo session) =>
         _trackBySession.TryGetValue(session.FilePath, out var location) ? location : null;
+
+    public string? MeanlinePathOf(SessionInfo session) => session.MeanlinePath ?? LocationOf(session)?.MeanlinePath;
+
+    public void ReplaceSession(SessionInfo session)
+    {
+        var index = _sessions.FindIndex(item => item.FilePath.Equals(session.FilePath, StringComparison.OrdinalIgnoreCase));
+        if (index >= 0)
+        {
+            _sessions[index] = session;
+        }
+    }
+
+    public static bool IsCsvSession(SessionInfo session) =>
+        session.AiMData is not null && session.FilePath.EndsWith(".csv", StringComparison.OrdinalIgnoreCase);
+
+    public static string CsvVenuePrefixedKey(string venue) => CsvVenueKeyPrefix + venue.Trim();
+
+    public static CsvVenueAssignment? GetCsvAssignment(ViewerSettings settings, string venue)
+    {
+        if (!settings.TrackMappings.TryGetValue(CsvVenuePrefixedKey(venue), out var json))
+        {
+            return null;
+        }
+
+        try
+        {
+            var assignment = JsonSerializer.Deserialize<CsvVenueAssignment>(json, JsonOptions);
+            return assignment is { Transform: not null, Version: >= CsvAssignmentVersion } ? assignment : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    public static string SerializeCsvAssignment(CsvVenueAssignment assignment) =>
+        JsonSerializer.Serialize(assignment with { Version = CsvAssignmentVersion });
+
+    public static double GetCsvShiftSeconds(ViewerSettings settings, string venue) =>
+        GetCsvAssignment(settings, venue)?.Transform?.ShiftSeconds ?? 0;
+
+    // CSV exports have no coordinates, so sessions are overlaid onto the assigned track's real GPS lap.
+    private void ApplyCsvTrackAssignments()
+    {
+        for (var index = 0; index < _sessions.Count; index++)
+        {
+            var current = _sessions[index];
+            if (!IsCsvSession(current))
+            {
+                continue;
+            }
+
+            if (!CsvOriginals.TryGetValue(current.FilePath, out var original))
+            {
+                original = current;
+                CsvOriginals[current.FilePath] = original;
+            }
+
+            var assignment = GetCsvAssignment(Settings, original.AiMData!.TrackName);
+            if (assignment?.Transform is not { } transform)
+            {
+                _sessions[index] = original;
+                continue;
+            }
+
+            var data = original.AiMData!;
+            _sessions[index] = original with
+            {
+                Latitude = assignment.Latitude,
+                Longitude = assignment.Longitude,
+                MeanlineTrackName = assignment.TrackName,
+                MeanlineConfigurationName = assignment.Configuration,
+                AiMData = data with
+                {
+                    Laps = data.Laps.Select(lap => lap with
+                    {
+                        Points = AimCsvAlignment.Apply(lap.Points, transform)
+                    }).ToArray()
+                }
+            };
+        }
+    }
 
     public void BuildTrackLocations()
     {
         _locations.Clear();
         _trackBySession.Clear();
+        ApplyCsvTrackAssignments();
 
-        var sessions = Sessions.OrderBy(session => session.Latitude)
+        var sessions = _sessions.OrderBy(session => session.Latitude)
             .ThenBy(session => session.Longitude)
             .ThenBy(session => session.LocalStart)
             .ToArray();
@@ -139,6 +238,19 @@ internal sealed class SessionModel
                     .DefaultIfEmpty(0)
                     .Average();
                 var meanlinePath = members.FirstOrDefault(session => session.MeanlinePath is not null)?.MeanlinePath;
+                if (meanlinePath is null && lengthM > 0)
+                {
+                    // Logger-only groups (AiM/VBOX) have no meanline of their own; borrow the closest-length one from the same venue.
+                    var borrowed = nearbySessions
+                        .Where(session => session.MeanlinePath is not null && session.MeanlineLengthM > 0)
+                        .OrderBy(session => Math.Abs(session.MeanlineLengthM - lengthM))
+                        .FirstOrDefault();
+                    if (borrowed is not null && Math.Abs(borrowed.MeanlineLengthM - lengthM) < lengthM * 0.1)
+                    {
+                        meanlinePath = borrowed.MeanlinePath;
+                    }
+                }
+
                 var location = new TrackLocation(
                     key, latitude, longitude, members, locationTrackName, configurationName, lengthM, meanlinePath,
                     displayGroup.Key);
@@ -169,15 +281,16 @@ internal sealed class SessionModel
             : session.MeanlineConfigurationName.Trim();
     }
 
+    // Same precedence as WPF: a per-session assignment wins over the vehicle-alias mapping.
     public string GetVehicleName(SessionInfo session)
     {
-        if (!string.IsNullOrWhiteSpace(session.VehicleAlias) &&
-            Settings.VehicleMappings.TryGetValue(session.VehicleAlias, out var mappedName))
+        if (Settings.SessionVehicleMappings.TryGetValue(session.SessionGuid, out var mappedName))
         {
             return mappedName;
         }
 
-        if (Settings.SessionVehicleMappings.TryGetValue(session.SessionGuid, out mappedName))
+        if (!string.IsNullOrWhiteSpace(session.VehicleAlias) &&
+            Settings.VehicleMappings.TryGetValue(session.VehicleAlias, out mappedName))
         {
             return mappedName;
         }
