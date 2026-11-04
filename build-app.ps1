@@ -1,0 +1,1 @@
+dotnet build .\TrackTelemetryViewer.csproj -c Release
