@@ -166,7 +166,11 @@ public sealed partial class MainWindow
             transform = AimCsvAlignment.FitTransform(MedianLap(recut).Points, referencePoints, shiftSeconds, mirror);
         }
 
-        return transform;
+        // Map lap distance through the layout's driven-distance profile (learned from its Garmin laps) and put the
+        // lap start on the Garmin start/finish line; the warp above is only the fallback when there are too few laps.
+        return AimCsvAlignment.AddDrivenFraction(transform,
+            target.Sessions.Where(session => !SessionModel.IsCsvSession(session)),
+            referencePoints, shift => TelemetryLoader.ReadAimCsvSessionInfo(venueFiles[0], _ => shift));
     }
 
     private static AiMLapData MedianLap(SessionInfo session) =>

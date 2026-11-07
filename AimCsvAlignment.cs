@@ -15,7 +15,10 @@ internal sealed record AimCsvTransform(
     double DistanceScale,
     double[]? PathLatitude = null,
     double[]? PathLongitude = null,
-    double[]? PathDistanceM = null);
+    double[]? PathDistanceM = null,
+    // Fraction of the driven lap distance completed at every DrivenFractionStepM of track (meanline) distance,
+    // learned from Garmin GPS laps of the layout. When present it replaces the heading warp (see MapByDrivenFraction).
+    double[]? DrivenFraction = null);
 
 /// <summary>
 /// Aligns a dead-reckoned AiM CSV lap (no real coordinates) onto a real GPS lap of the same track:
@@ -350,6 +353,12 @@ internal static class AimCsvAlignment
 
     public static IReadOnlyList<TelemetryPoint> Apply(IReadOnlyList<TelemetryPoint> points, AimCsvTransform transform)
     {
+        if (transform.DrivenFraction is { Length: > 10 } fraction && transform.PathDistanceM is { Length: > 10 } &&
+            transform.PathLatitude is not null && transform.PathLongitude is not null)
+        {
+            return MapByDrivenFraction(points, fraction, transform);
+        }
+
         var sourceScale = MetersPerDegree * Math.Cos(transform.SourceLatitude * Math.PI / 180);
         var targetScale = MetersPerDegree * Math.Cos(transform.RefLatitude * Math.PI / 180);
         var cos = Math.Cos(transform.RotationRad);
@@ -376,6 +385,277 @@ internal static class AimCsvAlignment
             transform.PathLongitude is not null)
         {
             ProjectDistances(result, transform);
+        }
+
+        return result;
+    }
+
+    // ---- Driven-distance profile: the generic CSV correction ----
+    //
+    // A CSV lap knows its own driven distance precisely (integrated GPS speed) but has no position. Garmin lap distance
+    // is progress along the track centreline, which runs up to ~8% ahead of driven distance where the racing line cuts
+    // corners. That relationship is a property of the layout and the racing line, so it is learned once from Garmin GPS
+    // laps as "fraction of the driven lap completed at each metre of track" and every CSV sample is mapped through it.
+    // Unlike the heading warp this cannot produce impossible local speeds (which showed up as time-delta drift).
+
+    public const double DrivenFractionStepM = 2;
+
+    /// <summary>
+    /// Adds the driven-distance profile to a fitted CSV transform and corrects its start shift so the CSV laps start on
+    /// the Garmin start/finish line. <paramref name="readCsv"/> re-reads the CSV with a given start shift.
+    /// Returns the transform unchanged if there aren't enough Garmin laps on the layout.
+    /// </summary>
+    public static AimCsvTransform AddDrivenFraction(
+        AimCsvTransform transform,
+        IEnumerable<SessionInfo> trackSessions,
+        IReadOnlyList<TelemetryPoint> referenceLap,
+        Func<double, SessionInfo> readCsv)
+    {
+        var trackLength = referenceLap[^1].DistanceM;
+        var garminLaps = new List<IReadOnlyList<TelemetryPoint>>();
+        foreach (var session in trackSessions
+                     .Where(session => session.AiMData is null &&
+                                       (session.MeanlineLengthM <= 0 || Math.Abs(session.MeanlineLengthM - trackLength) < 2))
+                     .Take(10))
+        {
+            try
+            {
+                garminLaps.AddRange(TelemetryLoader.ReadFastestDrivenLapTraces(session, 3));
+            }
+            catch (Exception exception) when (exception is IOException or InvalidDataException or System.Text.Json.JsonException)
+            {
+            }
+        }
+
+        if (BuildDrivenFraction(garminLaps, trackLength) is not { } fraction)
+        {
+            return transform;
+        }
+
+        var shift = transform.ShiftSeconds;
+        for (var pass = 0; pass < 3; pass++)
+        {
+            var laps = readCsv(shift).AiMData!.Laps;
+            var offset = StartOffsetMeters(laps, fraction, trackLength, garminLaps);
+            if (Math.Abs(offset) < 1)
+            {
+                break;
+            }
+
+            var startSpeeds = laps.Select(lap => lap.Points[0].SpeedMps).Where(speed => speed > 5).Order().ToArray();
+            if (startSpeeds.Length == 0)
+            {
+                break;
+            }
+
+            shift += offset / startSpeeds[startSpeeds.Length / 2];
+        }
+
+        return transform with { ShiftSeconds = shift, DrivenFraction = fraction };
+    }
+
+    /// <summary>Median, over Garmin GPS laps of one layout, of the driven-lap fraction completed at each track distance.</summary>
+    public static double[]? BuildDrivenFraction(IEnumerable<IReadOnlyList<TelemetryPoint>> garminLaps, double trackLengthM)
+    {
+        var count = (int)(trackLengthM / DrivenFractionStepM) + 1;
+        var profiles = new List<double[]>();
+        foreach (var lap in garminLaps)
+        {
+            var points = lap.Where(point => double.IsFinite(point.Latitude) && double.IsFinite(point.Longitude) &&
+                                            double.IsFinite(point.DistanceM)).ToArray();
+            if (points.Length < 100 || Math.Abs(points[^1].DistanceM - trackLengthM) > 5 || points[0].DistanceM > 5)
+            {
+                continue;
+            }
+
+            var driven = CumulativePathLength(points);
+            if (driven[^1] < trackLengthM * 0.8)
+            {
+                continue;
+            }
+
+            var profile = new double[count];
+            var cursor = 0;
+            for (var index = 0; index < count; index++)
+            {
+                var distance = index * DrivenFractionStepM;
+                while (cursor < points.Length - 2 && points[cursor + 1].DistanceM < distance)
+                {
+                    cursor++;
+                }
+
+                var span = points[cursor + 1].DistanceM - points[cursor].DistanceM;
+                var fraction = span > 0 ? Math.Clamp((distance - points[cursor].DistanceM) / span, 0, 1) : 0;
+                profile[index] = (driven[cursor] + (driven[cursor + 1] - driven[cursor]) * fraction) / driven[^1];
+            }
+
+            profile[0] = 0;
+            profile[^1] = 1;
+            profiles.Add(profile);
+        }
+
+        if (profiles.Count < 3)
+        {
+            return null;
+        }
+
+        var result = new double[count];
+        var column = new double[profiles.Count];
+        for (var index = 0; index < count; index++)
+        {
+            for (var lap = 0; lap < profiles.Count; lap++)
+            {
+                column[lap] = profiles[lap][index];
+            }
+
+            Array.Sort(column);
+            result[index] = Math.Round(column[column.Length / 2], 6);
+        }
+
+        for (var index = 1; index < count; index++)
+        {
+            result[index] = Math.Max(result[index], result[index - 1] + 1e-6);
+        }
+
+        result[^1] = Math.Max(result[^1], 1);
+        return result;
+    }
+
+    /// <summary>
+    /// How far (m along the track) a CSV session's laps, mapped by the profile, sit from where the Garmin laps turn:
+    /// one number for the whole session, since what it measures is where the CSV laps start relative to the
+    /// Garmin start/finish line. Negative means the CSV laps start too late.
+    /// </summary>
+    public static double StartOffsetMeters(
+        IReadOnlyList<AiMLapData> csvLaps,
+        double[] drivenFraction,
+        double trackLengthM,
+        IReadOnlyList<IReadOnlyList<TelemetryPoint>> garminLaps)
+    {
+        var templates = garminLaps.Take(15)
+            .Select(lap => HeadingByDistance(lap, lap.Select(point => point.DistanceM).ToArray(), trackLengthM))
+            .ToArray();
+        var offsets = new List<double>();
+        foreach (var lap in csvLaps.Where(lap => lap.Points.Count > 100))
+        {
+            var mapped = MapDistances(lap.Points, drivenFraction, trackLengthM);
+            var heading = HeadingByDistance(lap.Points, mapped, trackLengthM);
+            var best = (Error: double.MaxValue, Shift: 0);
+            for (var shift = -40; shift <= 40; shift++)
+            {
+                double error = 0;
+                for (var index = 50; index < heading.Length - 50; index++)
+                {
+                    foreach (var template in templates)
+                    {
+                        var difference = Math.IEEERemainder(heading[index + shift] - template[index], 2 * Math.PI);
+                        error += Math.Min(difference * difference, 0.1);
+                    }
+                }
+
+                if (error < best.Error)
+                {
+                    best = (error, shift);
+                }
+            }
+
+            offsets.Add(best.Shift * DrivenFractionStepM);
+        }
+
+        return offsets.Count == 0 ? 0 : offsets.Order().ElementAt(offsets.Count / 2);
+    }
+
+    private static IReadOnlyList<TelemetryPoint> MapByDrivenFraction(
+        IReadOnlyList<TelemetryPoint> points, double[] drivenFraction, AimCsvTransform transform)
+    {
+        var path = transform.PathDistanceM!;
+        var trackLength = (drivenFraction.Length - 1) * DrivenFractionStepM;
+        var distances = MapDistances(points, drivenFraction, Math.Min(trackLength, path[^1]));
+        var result = new TelemetryPoint[points.Count];
+        for (var index = 0; index < points.Count; index++)
+        {
+            var distance = distances[index];
+            var upper = Array.BinarySearch(path, distance);
+            upper = Math.Clamp(upper < 0 ? ~upper : upper, 1, path.Length - 1);
+            var lower = upper - 1;
+            var span = path[upper] - path[lower];
+            var fraction = span > 0 ? Math.Clamp((distance - path[lower]) / span, 0, 1) : 0;
+            result[index] = points[index] with
+            {
+                DistanceM = distance,
+                Latitude = transform.PathLatitude![lower] + (transform.PathLatitude[upper] - transform.PathLatitude[lower]) * fraction,
+                Longitude = transform.PathLongitude![lower] + (transform.PathLongitude[upper] - transform.PathLongitude[lower]) * fraction
+            };
+        }
+
+        return result;
+    }
+
+    // Track distance of each point: invert the profile at the point's fraction of its own driven lap distance.
+    private static double[] MapDistances(IReadOnlyList<TelemetryPoint> points, double[] drivenFraction, double trackLengthM)
+    {
+        var total = points[^1].DistanceM - points[0].DistanceM;
+        var result = new double[points.Count];
+        var cursor = 1;
+        for (var index = 0; index < points.Count; index++)
+        {
+            var fraction = total > 0 ? Math.Clamp((points[index].DistanceM - points[0].DistanceM) / total, 0, 1) : 0;
+            while (cursor < drivenFraction.Length - 1 && drivenFraction[cursor] < fraction)
+            {
+                cursor++;
+            }
+
+            while (cursor > 1 && drivenFraction[cursor - 1] > fraction)
+            {
+                cursor--;
+            }
+
+            var low = drivenFraction[cursor - 1];
+            var high = drivenFraction[cursor];
+            var step = high > low ? Math.Clamp((fraction - low) / (high - low), 0, 1) : 0;
+            result[index] = Math.Min(((cursor - 1) + step) * DrivenFractionStepM, trackLengthM);
+        }
+
+        return result;
+    }
+
+    private static double[] CumulativePathLength(IReadOnlyList<TelemetryPoint> points)
+    {
+        var result = new double[points.Count];
+        for (var index = 1; index < points.Count; index++)
+        {
+            var scale = MetersPerDegree * Math.Cos(points[index].Latitude * Math.PI / 180);
+            var dx = (points[index].Longitude - points[index - 1].Longitude) * scale;
+            var dy = (points[index].Latitude - points[index - 1].Latitude) * MetersPerDegree;
+            result[index] = result[index - 1] + Math.Sqrt(dx * dx + dy * dy);
+        }
+
+        return result;
+    }
+
+    // Heading every DrivenFractionStepM of the given distance coordinate, from the chord over ±6 m of positions.
+    private static double[] HeadingByDistance(IReadOnlyList<TelemetryPoint> path, IReadOnlyList<double> distance, double length)
+    {
+        var scale = MetersPerDegree * Math.Cos(path[0].Latitude * Math.PI / 180);
+        var count = (int)(length / DrivenFractionStepM) + 1;
+        var result = new double[count];
+        var behind = 0;
+        var ahead = 0;
+        for (var index = 0; index < count; index++)
+        {
+            var at = index * DrivenFractionStepM;
+            while (behind < distance.Count - 1 && distance[behind + 1] < at - 6)
+            {
+                behind++;
+            }
+
+            while (ahead < distance.Count - 1 && distance[ahead] < at + 6)
+            {
+                ahead++;
+            }
+
+            result[index] = Math.Atan2((path[ahead].Longitude - path[behind].Longitude) * scale,
+                (path[ahead].Latitude - path[behind].Latitude) * MetersPerDegree);
         }
 
         return result;

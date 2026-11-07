@@ -800,6 +800,8 @@ public partial class MainWindow : Window
             return;
         }
 
+        // Settings are loaded before the scan so CSV laps are cut with their venue's saved start/finish shift.
+        LoadViewerSettings(folder);
         var dataFileIndex = TelemetryLoader.BuildDataFileIndex(folder);
         var results = new SessionInfo?[files.Length];
         var errors = new string?[files.Length];
@@ -839,7 +841,6 @@ public partial class MainWindow : Window
         _csvOriginals.Clear();
         _sessions.AddRange(loaded.OrderBy(session => session.LocalStart));
         _dataFolder = folder;
-        LoadViewerSettings(folder);
         ApplyImportedCorrections(packageImport);
         ReportImport(packageImport);
         try

@@ -67,12 +67,12 @@ public partial class MainWindow
             var assignment = GetCsvAssignment(original.AiMData!.TrackName);
             if (assignment?.Transform is not { } transform)
             {
-                _sessions[index] = original;
+                ReplaceCsvSession(index, original);
                 continue;
             }
 
             var data = original.AiMData!;
-            _sessions[index] = original with
+            ReplaceCsvSession(index, original with
             {
                 Latitude = assignment.Latitude,
                 Longitude = assignment.Longitude,
@@ -85,7 +85,18 @@ public partial class MainWindow
                         Points = AimCsvAlignment.Apply(lap.Points, transform)
                     }).ToArray()
                 }
-            };
+            });
+        }
+    }
+
+    // Lap lists are cached per file and each LapInfo holds its session, whose laps ReadTrace returns. Refresh them
+    // whenever the session is replaced, or the charts keep showing the unaligned (dead-reckoned) laps.
+    private void ReplaceCsvSession(int index, SessionInfo session)
+    {
+        _sessions[index] = session;
+        if (_lapsBySession.ContainsKey(session.FilePath))
+        {
+            _lapsBySession[session.FilePath] = TelemetryLoader.ReadLaps(session);
         }
     }
 
@@ -312,7 +323,10 @@ public partial class MainWindow
             transform = AimCsvAlignment.FitTransform(MedianLap(recut).Points, referencePoints, shiftSeconds, mirror);
         }
 
-        return transform;
+        // Map lap distance through the layout's driven-distance profile (learned from its Garmin laps) and put the
+        // lap start on the Garmin start/finish line; the warp above is only the fallback when there are too few laps.
+        return AimCsvAlignment.AddDrivenFraction(transform, target.Sessions.Where(session => !IsCsvSession(session)),
+            referencePoints, shift => TelemetryLoader.ReadAimCsvSessionInfo(venueFiles[0], _ => shift));
     }
 
     private static AiMLapData MedianLap(SessionInfo session) =>

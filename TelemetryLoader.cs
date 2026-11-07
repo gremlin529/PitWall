@@ -949,10 +949,37 @@ internal static partial class TelemetryLoader
             lap = laps[selectedLap.Index];
         }
 
+        return new SessionTrace(selectedLap, ReadLapPoints(lap, selectedLap.Session.FileName));
+    }
+
+    /// <summary>
+    /// The fastest driven laps of a Garmin session, parsing its (large) performance file once rather than once per lap.
+    /// </summary>
+    public static IReadOnlyList<IReadOnlyList<TelemetryPoint>> ReadFastestDrivenLapTraces(SessionInfo session, int count)
+    {
+        using var stream = File.OpenRead(session.FilePath);
+        using var document = JsonDocument.Parse(stream);
+        if (!document.RootElement.TryGetProperty("drivenLaps", out var laps) || laps.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        return laps.EnumerateArray()
+            .Select(lap => (Lap: lap, DurationMs: GetNumber(lap, "durationMs")))
+            .Where(item => item.DurationMs > 0 && item.Lap.TryGetProperty("data", out var data) &&
+                           data.ValueKind == JsonValueKind.Array && data.GetArrayLength() > 1)
+            .OrderBy(item => item.DurationMs)
+            .Take(count)
+            .Select(item => (IReadOnlyList<TelemetryPoint>)ReadLapPoints(item.Lap, session.FileName))
+            .ToArray();
+    }
+
+    private static List<TelemetryPoint> ReadLapPoints(JsonElement lap, string fileName)
+    {
         if (!lap.TryGetProperty("data", out var pointsElement) ||
             pointsElement.ValueKind != JsonValueKind.Array)
         {
-            throw new InvalidDataException($"Lap telemetry was not found in {selectedLap.Session.FileName}.");
+            throw new InvalidDataException($"Lap telemetry was not found in {fileName}.");
         }
 
         var points = new List<TelemetryPoint>(pointsElement.GetArrayLength());
@@ -982,10 +1009,10 @@ internal static partial class TelemetryLoader
         points.Sort(static (left, right) => left.DistanceM.CompareTo(right.DistanceM));
         if (points.Count < 2)
         {
-            throw new InvalidDataException($"Not enough valid distance samples were found in {selectedLap.Session.FileName}.");
+            throw new InvalidDataException($"Not enough valid distance samples were found in {fileName}.");
         }
 
-        return new SessionTrace(selectedLap, points);
+        return points;
     }
 
     public static double InterpolateTimeMs(IReadOnlyList<TelemetryPoint> points, double distanceM)
