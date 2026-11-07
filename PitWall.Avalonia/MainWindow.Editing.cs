@@ -36,6 +36,7 @@ public sealed partial class MainWindow
             items.Add(Item("Use fastest lap as reference", async () => await UseFastestAsReferenceAsync([session])));
             items.Add(Item("Session details…", async () => await EditSessionAsync(session)));
             items.Add(CreateAssignVehicleMenu("Assign vehicle to this session", [], [session.SessionGuid], [session]));
+            AddSessionTrackAssignmentMenu(items, session);
             items.Add(Item("Export…", async () =>
                 await ExportAsync([session], session.LocalStart.ToString("yyyy-MM-dd HH.mm"))));
         }
@@ -99,6 +100,62 @@ public sealed partial class MainWindow
     {
         items.Add(Item("Use as reference lap", async () => await SetReferenceLapAsync(lap)));
         items.Add(Item("Clear reference lap", ClearReference, _referenceLap is not null));
+    }
+
+    private void AddSessionTrackAssignmentMenu(List<Control> items, SessionInfo session)
+    {
+        var parent = new MenuItem { Header = "Assign session to track" };
+        var current = _model.LocationOf(session);
+        foreach (var target in _model.Locations.Where(location => !ReferenceEquals(location, current))
+                     .OrderBy(location => location.DisplayName, StringComparer.CurrentCultureIgnoreCase))
+        {
+            var representative = target.Sessions.FirstOrDefault(candidate => !SessionModel.IsCsvSession(candidate)) ??
+                                 target.Sessions.FirstOrDefault();
+            if (representative is not null)
+            {
+                parent.Items.Add(Item(target.DisplayName,
+                    async () => await AssignSessionTrack(session, representative.SessionGuid)));
+            }
+        }
+
+        if (_model.Settings.SessionTrackAssignments.ContainsKey(session.SessionGuid))
+        {
+            if (parent.Items.Count > 0)
+            {
+                parent.Items.Add(new Separator());
+            }
+
+            parent.Items.Add(Item("Use detected track", async () => await AssignSessionTrack(session, string.Empty)));
+        }
+
+        if (parent.Items.Count > 0)
+        {
+            items.Add(parent);
+        }
+    }
+
+    private async Task AssignSessionTrack(SessionInfo session, string targetSessionGuid)
+    {
+        var updated = SettingsStore.Clone(_model.Settings);
+        if (string.IsNullOrWhiteSpace(targetSessionGuid))
+        {
+            updated.SessionTrackAssignments.Remove(session.SessionGuid);
+        }
+        else
+        {
+            updated.SessionTrackAssignments[session.SessionGuid] = targetSessionGuid;
+        }
+
+        if (!SaveSettings(updated, "Could not save track assignment"))
+        {
+            return;
+        }
+
+        _model.BuildTrackLocations();
+        await RebuildTreeAsync(true);
+        StatusText.Text = string.IsNullOrWhiteSpace(targetSessionGuid)
+            ? "The session now uses its detected track."
+            : "The session was assigned to the selected track.";
     }
 
     private static MenuItem Item(string header, Action action, bool enabled = true)
@@ -201,9 +258,10 @@ public sealed partial class MainWindow
             updated.VehicleMappings[alias] = vehicleName;
         }
 
-        foreach (var guid in sessionGuids)
+        foreach (var session in sessions)
         {
-            updated.SessionVehicleMappings[guid] = vehicleName;
+            updated.SessionVehicleMappings.Remove(session.SessionGuid);
+            updated.SessionVehicleMappings[session.VehicleAssignmentKey] = vehicleName;
         }
 
         // A car-level assignment applies through the alias, so drop per-session overrides it would hide.
@@ -412,6 +470,27 @@ public sealed partial class MainWindow
             !SaveSettings(updated, "Could not save settings"))
         {
             return;
+        }
+
+        if (dialog.VehicleRenames.Count > 0)
+        {
+            var editsChanged = false;
+            foreach (var sessionGuid in _model.Edits.Keys.ToArray())
+            {
+                var edits = _model.Edits[sessionGuid];
+                var rename = dialog.VehicleRenames.FirstOrDefault(pair =>
+                    pair.Key.Equals(edits.VehicleName, StringComparison.CurrentCultureIgnoreCase));
+                if (!string.IsNullOrEmpty(rename.Key))
+                {
+                    _model.Edits[sessionGuid] = edits with { VehicleName = rename.Value };
+                    editsChanged = true;
+                }
+            }
+
+            if (editsChanged && SettingsStore.SaveEdits(_model.Edits) is { } editsError)
+            {
+                await Dialogs.ShowMessageAsync(this, "Could not save session names", editsError);
+            }
         }
 
         _loading = true;

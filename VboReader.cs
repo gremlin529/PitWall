@@ -205,6 +205,37 @@ internal static partial class TelemetryLoader
             null,
             0,
             0,
-            new AiMSessionData(driver, vehicle, venue, laps));
+            new AiMSessionData(driver, vehicle, venue, laps, CreateVboStream()));
+
+        AiMSessionStream CreateVboStream()
+        {
+            var points = new TelemetryPoint[rows.Count];
+            var distance = 0d;
+            for (var index = 0; index < rows.Count; index++)
+            {
+                if (index > 0)
+                {
+                    distance += DistanceBetweenMeters(Latitude(index - 1), Longitude(index - 1), Latitude(index), Longitude(index));
+                }
+
+                points[index] = new TelemetryPoint(
+                    distance,
+                    seconds[index] * 1000,
+                    Math.Max(0, rows[index][speedColumn] / 3.6),
+                    longitudinalColumn >= 0 ? rows[index][longitudinalColumn] : double.NaN,
+                    lateralColumn >= 0 ? rows[index][lateralColumn] : double.NaN,
+                    Latitude(index),
+                    Longitude(index));
+            }
+
+            var channels = channelColumns.Select(column => new AiMChannelData(
+                    names[column],
+                    VboChannelUnits.GetValueOrDefault(names[column], string.Empty),
+                    Enumerable.Range(0, rows.Count)
+                        .Select(row => new AiMChannelSample(seconds[row] * 1000, rows[row][column]))
+                        .ToArray()))
+                .ToArray();
+            return new AiMSessionStream(points, channels);
+        }
     }
 }

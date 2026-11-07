@@ -63,9 +63,24 @@ internal static partial class TelemetryLoader
     public static IEnumerable<string> EnumerateFilesRecursively(string folder, string pattern) =>
         Directory.EnumerateFiles(folder, pattern, SearchOption.AllDirectories);
 
+    public static IEnumerable<string> EnumerateAimSessionFiles(string folder)
+    {
+        var compressed = EnumerateFilesRecursively(folder, "*.xrz").ToArray();
+        var compressedSources = compressed.Select(path => Path.ChangeExtension(
+                Path.GetFullPath(path), ".xrk"))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return compressed.Concat(EnumerateFilesRecursively(folder, "*.xrk")
+                .Where(path => !compressedSources.Contains(Path.GetFullPath(path))))
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase);
+    }
+
+    public static bool IsAimSessionFile(string filePath) =>
+        Path.GetExtension(filePath).Equals(".xrk", StringComparison.OrdinalIgnoreCase) ||
+        Path.GetExtension(filePath).Equals(".xrz", StringComparison.OrdinalIgnoreCase);
+
     public static bool HasSessionFiles(string folder) =>
         EnumerateFilesRecursively(folder, "autosport-performance-*.json").Any() ||
-        EnumerateFilesRecursively(folder, "*.xrk").Any() ||
+        EnumerateAimSessionFiles(folder).Any() ||
         EnumerateAimCsvFiles(folder).Any() ||
         EnumerateVboFiles(folder).Any();
 
@@ -244,7 +259,11 @@ internal static partial class TelemetryLoader
             null,
             0,
             0,
-            new AiMSessionData(sourceDriver, sourceVehicle, trackName.Trim(), laps));
+            new AiMSessionData(sourceDriver, sourceVehicle, trackName.Trim(), laps,
+                new AiMSessionStream(
+                    CreateAiMPoints(samples, 0),
+                    channels.Select(channel => new AiMChannelData(channel.Name, channel.Units, channel.Samples))
+                        .ToArray())));
     }
 
     private static IReadOnlyList<AiMLapData> ReadAiMLaps(

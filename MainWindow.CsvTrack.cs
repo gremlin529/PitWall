@@ -220,7 +220,9 @@ public partial class MainWindow
             ChannelOrder = [.. _viewerSettings.ChannelOrder],
             TrackMappings = mappings,
             SessionLayoutAssignments = new Dictionary<string, string>(
-                _viewerSettings.SessionLayoutAssignments, StringComparer.OrdinalIgnoreCase)
+                _viewerSettings.SessionLayoutAssignments, StringComparer.OrdinalIgnoreCase),
+            SessionTrackAssignments = new Dictionary<string, string>(
+                _viewerSettings.SessionTrackAssignments, StringComparer.OrdinalIgnoreCase)
         };
         var settingsPath = GetViewerSettingsPath();
         try

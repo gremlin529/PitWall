@@ -261,7 +261,7 @@
                                         <ColumnDefinition Width="*"/>
                                         <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
-                                    <TextBlock Text="{Binding Name}" VerticalAlignment="Center"/>
+                                    <TextBox Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}" VerticalAlignment="Center"/>
                                     <Button Grid.Column="1" Tag="{Binding}"
                                             Click="ToggleVehicleVisibility_Click"
                                             Padding="8,4" Margin="8,0,0,0"

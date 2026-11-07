@@ -214,8 +214,9 @@ public sealed partial class MainWindow : Window
             var edits = SettingsStore.LoadEdits(warnings);
             var settings = result.Settings;
             ApplyImportedCorrections(result.Import, settings, edits);
+            var alignedSessions = await Task.Run(() => AimGpsSessionAlignment.CorrectSessions(result.Sessions));
             _model = new SessionModel(
-                result.Sessions.OrderBy(session => session.LocalStart), settings, result.Catalog, result.DriverNames, edits);
+                alignedSessions.OrderBy(session => session.LocalStart), settings, result.Catalog, result.DriverNames, edits);
             _loading = true;
             UnitsBox.SelectedIndex = settings.DistanceUnits.Equals("Imperial", StringComparison.OrdinalIgnoreCase)
                 ? 1
@@ -325,7 +326,7 @@ public sealed partial class MainWindow : Window
         // Settings are read before the scan so CSV laps are cut with their venue's saved start/finish shift.
         var settings = SettingsStore.Load(folder, failures);
         var files = TelemetryLoader.EnumerateFilesRecursively(folder, "autosport-performance-*.json")
-            .Concat(TelemetryLoader.EnumerateFilesRecursively(folder, "*.xrk"))
+            .Concat(TelemetryLoader.EnumerateAimSessionFiles(folder))
             .Concat(TelemetryLoader.EnumerateAimCsvFiles(folder))
             .Concat(TelemetryLoader.EnumerateVboFiles(folder))
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
@@ -338,7 +339,7 @@ public sealed partial class MainWindow : Window
             try
             {
                 var extension = Path.GetExtension(file);
-                sessions.Add(extension.Equals(".xrk", StringComparison.OrdinalIgnoreCase)
+                sessions.Add(TelemetryLoader.IsAimSessionFile(file)
                     ? TelemetryLoader.ReadAiMSessionInfo(file)
                     : extension.Equals(".csv", StringComparison.OrdinalIgnoreCase)
                         ? TelemetryLoader.ReadAimCsvSessionInfo(file,

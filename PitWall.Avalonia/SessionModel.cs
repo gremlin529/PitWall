@@ -143,6 +143,7 @@ internal sealed class SessionModel
         _locations.Clear();
         _trackBySession.Clear();
         ApplyCsvTrackAssignments();
+        ApplySessionTrackAssignments();
 
         var sessions = _sessions.OrderBy(session => session.Latitude)
             .ThenBy(session => session.Longitude)
@@ -268,6 +269,22 @@ internal sealed class SessionModel
 
     public string GetEffectiveLayoutName(SessionInfo session)
     {
+        if (Settings.SessionTrackAssignments.TryGetValue(session.SessionGuid, out var targetGuid) &&
+            !targetGuid.Equals(session.SessionGuid, StringComparison.OrdinalIgnoreCase))
+        {
+            var target = _sessions.FirstOrDefault(candidate =>
+                candidate.SessionGuid.Equals(targetGuid, StringComparison.OrdinalIgnoreCase));
+            if (target is not null)
+            {
+                return GetSourceLayoutName(target);
+            }
+        }
+
+        return GetSourceLayoutName(session);
+    }
+
+    private string GetSourceLayoutName(SessionInfo session)
+    {
         if (Settings.SessionLayoutAssignments.TryGetValue(session.SessionGuid, out var assignedLayout))
         {
             return assignedLayout.Equals(UnspecifiedLayout, StringComparison.OrdinalIgnoreCase) ||
@@ -281,10 +298,46 @@ internal sealed class SessionModel
             : session.MeanlineConfigurationName.Trim();
     }
 
+    private void ApplySessionTrackAssignments()
+    {
+        if (Settings.SessionTrackAssignments.Count == 0)
+        {
+            return;
+        }
+
+        var targets = _sessions.GroupBy(session => session.SessionGuid, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+        for (var index = 0; index < _sessions.Count; index++)
+        {
+            var source = _sessions[index];
+            if (!Settings.SessionTrackAssignments.TryGetValue(source.SessionGuid, out var targetGuid) ||
+                targetGuid.Equals(source.SessionGuid, StringComparison.OrdinalIgnoreCase) ||
+                !targets.TryGetValue(targetGuid, out var target))
+            {
+                continue;
+            }
+
+            _sessions[index] = source with
+            {
+                Latitude = target.Latitude,
+                Longitude = target.Longitude,
+                MeanlinePath = target.MeanlinePath,
+                MeanlineTrackName = target.MeanlineTrackName,
+                MeanlineConfigurationName = GetSourceLayoutName(target),
+                MeanlineLengthM = target.MeanlineLengthM
+            };
+        }
+    }
+
     // Same precedence as WPF: a per-session assignment wins over the vehicle-alias mapping.
     public string GetVehicleName(SessionInfo session)
     {
-        if (Settings.SessionVehicleMappings.TryGetValue(session.SessionGuid, out var mappedName))
+        if (Settings.SessionVehicleMappings.TryGetValue(session.VehicleAssignmentKey, out var mappedName))
+        {
+            return mappedName;
+        }
+
+        if (Settings.SessionVehicleMappings.TryGetValue(session.SessionGuid, out mappedName))
         {
             return mappedName;
         }

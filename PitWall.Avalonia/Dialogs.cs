@@ -185,7 +185,11 @@ internal sealed class SettingsWindow : Window
     private readonly HashSet<string> _custom;
     private readonly HashSet<string> _catalogNames;
     private readonly List<(TrackAliasSetting Setting, TextBox Box)> _trackBoxes = [];
+    private readonly List<(string OriginalName, CheckBox Visibility, TextBox Name)> _vehicleRows = [];
     private readonly StackPanel _vehicleList = new() { Spacing = 2 };
+
+    public IReadOnlyDictionary<string, string> VehicleRenames { get; private set; } =
+        new Dictionary<string, string>(StringComparer.CurrentCultureIgnoreCase);
 
     public SettingsWindow(
         ViewerSettings settings,
@@ -420,14 +424,28 @@ internal sealed class SettingsWindow : Window
                 _hidden.Add(name);
             }
         };
-        _vehicleList.Children.Add(check);
+        var nameBox = new TextBox { Text = name, Width = 240, VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center };
+        _vehicleRows.Add((name, check, nameBox));
+        _vehicleList.Children.Add(Row(check, nameBox));
     }
 
     private ViewerSettings BuildResult()
     {
         var result = SettingsStore.Clone(_original);
         result.DistanceUnits = _units.SelectedIndex == 1 ? "Imperial" : "Metric";
-        result.HiddenVehicleNames = _hidden.OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase).ToList();
+        var renames = _vehicleRows.Where(row => !string.IsNullOrWhiteSpace(row.Name.Text) &&
+                !row.Name.Text.Trim().Equals(row.OriginalName, StringComparison.CurrentCultureIgnoreCase))
+            .ToDictionary(row => row.OriginalName, row => row.Name.Text!.Trim(),
+                StringComparer.CurrentCultureIgnoreCase);
+        VehicleRenames = renames;
+        var represented = new HashSet<string>(_vehicleRows.Select(row => row.OriginalName),
+            StringComparer.CurrentCultureIgnoreCase);
+        result.HiddenVehicleNames = _hidden.Where(name => !represented.Contains(name))
+            .Concat(_vehicleRows.Where(row => row.Visibility.IsChecked != true)
+                .Select(row => row.Name.Text?.Trim() ?? string.Empty)
+                .Where(name => name.Length > 0))
+            .Distinct(StringComparer.CurrentCultureIgnoreCase)
+            .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase).ToList();
         result.VehicleMappings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (alias, box) in _autoBoxes)
         {
@@ -442,7 +460,28 @@ internal sealed class SettingsWindow : Window
             }
         }
 
+        foreach (var alias in result.VehicleMappings.Keys.ToArray())
+        {
+            var mappedName = result.VehicleMappings[alias];
+            if (renames.FirstOrDefault(pair => pair.Key.Equals(mappedName,
+                    StringComparison.CurrentCultureIgnoreCase)) is { Key.Length: > 0 } renamed)
+            {
+                result.VehicleMappings[alias] = renamed.Value;
+            }
+        }
+        foreach (var sessionGuid in result.SessionVehicleMappings.Keys.ToArray())
+        {
+            var mappedName = result.SessionVehicleMappings[sessionGuid];
+            if (renames.FirstOrDefault(pair => pair.Key.Equals(mappedName,
+                    StringComparison.CurrentCultureIgnoreCase)) is { Key.Length: > 0 } renamed)
+            {
+                result.SessionVehicleMappings[sessionGuid] = renamed.Value;
+            }
+        }
+
         result.CustomVehicleNames = _custom
+            .Where(name => !renames.ContainsKey(name))
+            .Concat(renames.Values.Where(name => !_catalogNames.Contains(name)))
             .Where(name => !_catalogNames.Contains(name))
             .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase)
             .ToList();

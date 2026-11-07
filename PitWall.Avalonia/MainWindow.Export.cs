@@ -98,12 +98,13 @@ public sealed partial class MainWindow
             var session = source.Session;
             var baseName = PitWallPackage.SanitizeSegment(
                 $"{session.LocalStart:yyyyMMdd_HHmmss}_{source.Driver}_{source.TrackName}", "session");
-            var path = UniquePath(folder, baseName, ".xrk");
+            var sourceIsXrz = session.FilePath.EndsWith(".xrz", StringComparison.OrdinalIgnoreCase);
+            var path = UniquePath(folder, baseName, sourceIsXrz ? ".xrz" : ".xrk");
             try
             {
                 if (session.AiMData is not null)
                 {
-                    if (!session.FilePath.EndsWith(".xrk", StringComparison.OrdinalIgnoreCase))
+                    if (!TelemetryLoader.IsAimSessionFile(session.FilePath))
                     {
                         notes.Add($"{session.LocalStart:g}: CSV-sourced sessions can't be exported to XRK.");
                         continue;

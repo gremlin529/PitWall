@@ -69,6 +69,8 @@ public partial class SettingsWindow : Window
     public ObservableCollection<string> VehicleNames { get; }
 
     internal ViewerSettings Settings { get; private set; }
+    internal IReadOnlyDictionary<string, string> VehicleRenames { get; private set; } =
+        new Dictionary<string, string>(StringComparer.CurrentCultureIgnoreCase);
 
     private void AddVehicle_Click(object sender, RoutedEventArgs e)
     {
@@ -220,16 +222,6 @@ public partial class SettingsWindow : Window
 
     private void Save_Click(object sender, RoutedEventArgs e)
     {
-        var mappings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var alias in _aliases)
-        {
-            var vehicleName = alias.VehicleName.Trim();
-            if (!string.IsNullOrWhiteSpace(vehicleName))
-            {
-                mappings[alias.Alias] = vehicleName;
-            }
-        }
-
         var trackMappings = new Dictionary<string, string>(
             Settings.TrackMappings, StringComparer.OrdinalIgnoreCase);
         foreach (var alias in _trackAliases)
@@ -253,25 +245,71 @@ public partial class SettingsWindow : Window
             channelVisibility[channel.Key] = channel.IsEnabled;
         }
 
+        var renames = _vehicles.Where(vehicle => !string.IsNullOrWhiteSpace(vehicle.Name) &&
+                !vehicle.Name.Equals(vehicle.OriginalName, StringComparison.CurrentCultureIgnoreCase))
+            .ToDictionary(vehicle => vehicle.OriginalName, vehicle => vehicle.Name.Trim(),
+                StringComparer.CurrentCultureIgnoreCase);
+        VehicleRenames = renames;
+        foreach (var (oldName, newName) in renames)
+        {
+            for (var index = 0; index < _aliases.Count; index++)
+            {
+                if (_aliases[index].VehicleName.Equals(oldName, StringComparison.CurrentCultureIgnoreCase))
+                {
+                    _aliases[index].VehicleName = newName;
+                }
+            }
+            _customVehicleNames.Remove(oldName);
+            _hiddenVehicleNames.Remove(oldName);
+        }
+        foreach (var vehicle in _vehicles)
+        {
+            vehicle.Name = vehicle.Name.Trim();
+        }
+        var mappings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var alias in _aliases)
+        {
+            var vehicleName = alias.VehicleName.Trim();
+            if (!string.IsNullOrWhiteSpace(vehicleName))
+            {
+                mappings[alias.Alias] = vehicleName;
+            }
+        }
+        var sessionVehicleMappings = new Dictionary<string, string>(
+            Settings.SessionVehicleMappings, StringComparer.OrdinalIgnoreCase);
+        foreach (var sessionGuid in sessionVehicleMappings.Keys.ToArray())
+        {
+            var mappedName = sessionVehicleMappings[sessionGuid];
+            var renamed = renames.FirstOrDefault(pair =>
+                pair.Key.Equals(mappedName, StringComparison.CurrentCultureIgnoreCase));
+            if (!string.IsNullOrEmpty(renamed.Key))
+            {
+                sessionVehicleMappings[sessionGuid] = renamed.Value;
+            }
+        }
+
         Settings = new ViewerSettings
         {
             DistanceUnits = DistanceUnitCombo.SelectedIndex == 1 ? "Imperial" : "Metric",
             CustomVehicleNames = _customVehicleNames
+                .Concat(renames.Values.Where(name => !_catalogVehicleNames.Contains(name)))
                 .Where(name => !_catalogVehicleNames.Contains(name))
                 .Distinct(StringComparer.CurrentCultureIgnoreCase)
                 .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase)
                 .ToList(),
             HiddenVehicleNames = _hiddenVehicleNames
+                .Concat(_vehicles.Where(vehicle => vehicle.IsHidden).Select(vehicle => vehicle.Name))
                 .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase)
                 .ToList(),
             VehicleMappings = mappings,
-            SessionVehicleMappings = new Dictionary<string, string>(
-                Settings.SessionVehicleMappings, StringComparer.OrdinalIgnoreCase),
+            SessionVehicleMappings = sessionVehicleMappings,
             ChannelVisibility = channelVisibility,
             ChannelOrder = _channels.Select(channel => channel.Key).ToList(),
             TrackMappings = trackMappings,
             SessionLayoutAssignments = new Dictionary<string, string>(
-                Settings.SessionLayoutAssignments, StringComparer.OrdinalIgnoreCase)
+                Settings.SessionLayoutAssignments, StringComparer.OrdinalIgnoreCase),
+            SessionTrackAssignments = new Dictionary<string, string>(
+                Settings.SessionTrackAssignments, StringComparer.OrdinalIgnoreCase)
         };
         DialogResult = true;
     }

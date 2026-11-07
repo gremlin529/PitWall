@@ -28,6 +28,8 @@ internal static class SettingsStore
         ChannelOrder = [.. source.ChannelOrder],
         SessionLayoutAssignments = new Dictionary<string, string>(
             source.SessionLayoutAssignments, StringComparer.OrdinalIgnoreCase),
+        SessionTrackAssignments = new Dictionary<string, string>(
+            source.SessionTrackAssignments, StringComparer.OrdinalIgnoreCase),
         TrackMappings = new Dictionary<string, string>(source.TrackMappings, StringComparer.OrdinalIgnoreCase)
     };
 
@@ -57,6 +59,7 @@ internal static class SettingsStore
                     .Distinct(StringComparer.CurrentCultureIgnoreCase).ToList();
                 Merge(settings.TrackMappings, loaded.TrackMappings);
                 Merge(settings.SessionLayoutAssignments, loaded.SessionLayoutAssignments);
+                Merge(settings.SessionTrackAssignments, loaded.SessionTrackAssignments);
                 Merge(settings.SessionVehicleMappings, loaded.SessionVehicleMappings);
                 Merge(settings.VehicleMappings, loaded.VehicleMappings);
                 foreach (var (key, visible) in loaded.ChannelVisibility ?? [])

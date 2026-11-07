@@ -1,3 +1,5 @@
+using System.IO;
+
 namespace TrackTelemetryViewer;
 
 internal sealed record AimCsvTransform(
@@ -130,7 +132,27 @@ internal static class AimCsvAlignment
             var position = Math.Clamp(points[index].DistanceM / WarpStepM, 0, warp.Length - 1);
             var low = Math.Min((int)position, warp.Length - 2);
             var distance = warp[low] + (warp[low + 1] - warp[low]) * (position - low);
-            points[index] = points[index] with { DistanceM = Math.Min(distance, maxDistance) };
+            distance = Math.Clamp(distance, 0, maxDistance);
+            var upper = Array.BinarySearch(pathDistance, distance);
+            if (upper < 0)
+            {
+                upper = ~upper;
+            }
+
+            upper = Math.Clamp(upper, 1, pathDistance.Length - 1);
+            var lower = upper - 1;
+            var span = pathDistance[upper] - pathDistance[lower];
+            var fraction = span > 0 ? (distance - pathDistance[lower]) / span : 0;
+            var latitude = transform.PathLatitude![lower] +
+                           (transform.PathLatitude[upper] - transform.PathLatitude[lower]) * fraction;
+            var longitude = transform.PathLongitude![lower] +
+                            (transform.PathLongitude[upper] - transform.PathLongitude[lower]) * fraction;
+            points[index] = points[index] with
+            {
+                DistanceM = distance,
+                Latitude = latitude,
+                Longitude = longitude
+            };
         }
     }
 

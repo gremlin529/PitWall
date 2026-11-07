@@ -281,6 +281,26 @@ public partial class MainWindow : Window
         }
 
         _viewerSettings = dialog.Settings;
+        if (dialog.VehicleRenames.Count > 0)
+        {
+            var editsChanged = false;
+            foreach (var sessionGuid in _sessionEdits.Keys.ToArray())
+            {
+                var edits = _sessionEdits[sessionGuid];
+                var rename = dialog.VehicleRenames.FirstOrDefault(pair =>
+                    pair.Key.Equals(edits.VehicleName, StringComparison.CurrentCultureIgnoreCase));
+                if (!string.IsNullOrEmpty(rename.Key))
+                {
+                    _sessionEdits[sessionGuid] = edits with { VehicleName = rename.Value };
+                    editsChanged = true;
+                }
+            }
+
+            if (editsChanged)
+            {
+                SaveSessionEdits();
+            }
+        }
         _vehicleMappings.Clear();
         foreach (var (alias, vehicleName) in _viewerSettings.VehicleMappings)
         {
@@ -649,6 +669,14 @@ public partial class MainWindow : Window
                     }
                 }
 
+                foreach (var (sessionGuid, targetSessionGuid) in loadedSettings.SessionTrackAssignments ?? [])
+                {
+                    if (!string.IsNullOrWhiteSpace(sessionGuid) && !string.IsNullOrWhiteSpace(targetSessionGuid))
+                    {
+                        _viewerSettings.SessionTrackAssignments[sessionGuid] = targetSessionGuid;
+                    }
+                }
+
                 foreach (var (sessionGuid, vehicleName) in loadedSettings.SessionVehicleMappings ?? [])
                 {
                     if (!string.IsNullOrWhiteSpace(sessionGuid) && !string.IsNullOrWhiteSpace(vehicleName))
@@ -757,7 +785,7 @@ public partial class MainWindow : Window
         var packageImport = await Task.Run(() => ExtractPackages(folder, _pendingPackages.ToArray()));
         _pendingPackages.Clear();
         var performanceFiles = TelemetryLoader.EnumerateFilesRecursively(folder, "autosport-performance-*.json");
-        var aimFiles = TelemetryLoader.EnumerateFilesRecursively(folder, "*.xrk");
+        var aimFiles = TelemetryLoader.EnumerateAimSessionFiles(folder);
         var csvFiles = TelemetryLoader.EnumerateAimCsvFiles(folder);
         var vboFiles = TelemetryLoader.EnumerateVboFiles(folder);
         var files = performanceFiles.Concat(aimFiles).Concat(csvFiles).Concat(vboFiles)
@@ -766,7 +794,7 @@ public partial class MainWindow : Window
         if (files.Length == 0)
         {
             MessageBox.Show(this,
-                "No Garmin performance JSON or AiM XRK session files were found in the selected folder.",
+                "No Garmin performance JSON or AiM XRK/XRZ session files were found in the selected folder.",
                 "No session files", MessageBoxButton.OK, MessageBoxImage.Information);
             StatusText.Text = "No session files found.";
             return;
@@ -783,7 +811,7 @@ public partial class MainWindow : Window
                 try
                 {
                     var extension = Path.GetExtension(file);
-                    loaded.Add(extension.Equals(".xrk", StringComparison.OrdinalIgnoreCase)
+                    loaded.Add(TelemetryLoader.IsAimSessionFile(file)
                         ? TelemetryLoader.ReadAiMSessionInfo(file)
                         : extension.Equals(".csv", StringComparison.OrdinalIgnoreCase)
                             ? TelemetryLoader.ReadAimCsvSessionInfo(file, GetCsvShiftSeconds)
@@ -820,6 +848,10 @@ public partial class MainWindow : Window
             MessageBox.Show(this, exception.Message, "Vehicle catalog could not be loaded",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
         }
+        UpdateLoadingDetail("Matching AiM and Garmin lap start/finish crossings…");
+        var aimCorrections = await Task.Run(() => AimGpsSessionAlignment.CorrectSessions(_sessions));
+        _sessions.Clear();
+        _sessions.AddRange(aimCorrections);
         try
         {
             _driverNames = TelemetryLoader.ReadDriverNames(folder);
@@ -889,6 +921,7 @@ public partial class MainWindow : Window
         _locations.Clear();
         _trackBySession.Clear();
         ApplyCsvTrackAssignments();
+        ApplySessionTrackAssignments();
 
         var sessions = _sessions.OrderBy(session => session.Latitude)
             .ThenBy(session => session.Longitude)
@@ -1021,6 +1054,22 @@ public partial class MainWindow : Window
 
     private string GetEffectiveLayoutName(SessionInfo session)
     {
+        if (_viewerSettings.SessionTrackAssignments.TryGetValue(session.SessionGuid, out var targetGuid) &&
+            !targetGuid.Equals(session.SessionGuid, StringComparison.OrdinalIgnoreCase))
+        {
+            var target = _sessions.FirstOrDefault(candidate =>
+                candidate.SessionGuid.Equals(targetGuid, StringComparison.OrdinalIgnoreCase));
+            if (target is not null)
+            {
+                return GetSourceLayoutName(target);
+            }
+        }
+
+        return GetSourceLayoutName(session);
+    }
+
+    private string GetSourceLayoutName(SessionInfo session)
+    {
         if (_viewerSettings.SessionLayoutAssignments.TryGetValue(session.SessionGuid, out var assignedLayout))
         {
             return assignedLayout.Equals(UnspecifiedLayout, StringComparison.OrdinalIgnoreCase) ||
@@ -1033,6 +1082,39 @@ public partial class MainWindow : Window
             "Layout unspecified", StringComparison.OrdinalIgnoreCase)
             ? string.Empty
             : session.MeanlineConfigurationName.Trim();
+    }
+
+    private void ApplySessionTrackAssignments()
+    {
+        if (_viewerSettings.SessionTrackAssignments.Count == 0)
+        {
+            return;
+        }
+
+        var originalSessions = _sessions.ToArray();
+        var targets = originalSessions
+            .GroupBy(session => session.SessionGuid, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+        for (var index = 0; index < _sessions.Count; index++)
+        {
+            var source = _sessions[index];
+            if (!_viewerSettings.SessionTrackAssignments.TryGetValue(source.SessionGuid, out var targetGuid) ||
+                targetGuid.Equals(source.SessionGuid, StringComparison.OrdinalIgnoreCase) ||
+                !targets.TryGetValue(targetGuid, out var target))
+            {
+                continue;
+            }
+
+            _sessions[index] = source with
+            {
+                Latitude = target.Latitude,
+                Longitude = target.Longitude,
+                MeanlinePath = target.MeanlinePath,
+                MeanlineTrackName = target.MeanlineTrackName,
+                MeanlineConfigurationName = GetSourceLayoutName(target),
+                MeanlineLengthM = target.MeanlineLengthM
+            };
+        }
     }
 
     private ContextMenu? CreateLayoutContextMenu(TrackLocation location)
@@ -1111,7 +1193,9 @@ public partial class MainWindow : Window
             ChannelOrder = [.. _viewerSettings.ChannelOrder],
             TrackMappings = new Dictionary<string, string>(
                 _viewerSettings.TrackMappings, StringComparer.OrdinalIgnoreCase),
-            SessionLayoutAssignments = assignments
+            SessionLayoutAssignments = assignments,
+            SessionTrackAssignments = new Dictionary<string, string>(
+                _viewerSettings.SessionTrackAssignments, StringComparer.OrdinalIgnoreCase)
         };
         var settingsPath = GetViewerSettingsPath();
         try
@@ -1761,9 +1845,10 @@ public partial class MainWindow : Window
         }
         var updatedSessionMappings = new Dictionary<string, string>(
             _viewerSettings.SessionVehicleMappings, StringComparer.OrdinalIgnoreCase);
-        foreach (var sessionGuid in assignment.SessionGuids)
+        foreach (var session in assignment.Sessions)
         {
-            updatedSessionMappings[sessionGuid] = assignment.VehicleName;
+            updatedSessionMappings.Remove(session.SessionGuid);
+            updatedSessionMappings[session.VehicleAssignmentKey] = assignment.VehicleName;
         }
 
         // A car-level assignment applies through the alias, so drop per-session overrides it would hide.
@@ -1791,7 +1876,9 @@ public partial class MainWindow : Window
             TrackMappings = new Dictionary<string, string>(
                 _viewerSettings.TrackMappings, StringComparer.OrdinalIgnoreCase),
             SessionLayoutAssignments = new Dictionary<string, string>(
-                _viewerSettings.SessionLayoutAssignments, StringComparer.OrdinalIgnoreCase)
+                _viewerSettings.SessionLayoutAssignments, StringComparer.OrdinalIgnoreCase),
+            SessionTrackAssignments = new Dictionary<string, string>(
+                _viewerSettings.SessionTrackAssignments, StringComparer.OrdinalIgnoreCase)
         };
         var mappingPath = GetViewerSettingsPath();
         try
@@ -1844,6 +1931,8 @@ public partial class MainWindow : Window
         IReadOnlyList<string> SessionGuids,
         string VehicleName,
         IReadOnlyList<SessionInfo> Sessions);
+
+    private sealed record SessionTrackChoice(string SourceSessionGuid, string TargetSessionGuid);
 
     private async Task LoadFastestLapHeadersAsync(int generation)
     {
@@ -2014,8 +2103,108 @@ public partial class MainWindow : Window
         menu.Items.Add(detailsItem);
         menu.Items.Add(CreateAssignVehicleMenuItem(
             "Assign vehicle to this session", [], [session.SessionGuid], [session]));
+        AddSessionTrackAssignmentMenu(menu, session);
         menu.Items.Add(CreateExportMenuItem([session], session.LocalStart.ToString("yyyy-MM-dd HH.mm")));
         return menu;
+    }
+
+    private void AddSessionTrackAssignmentMenu(ContextMenu menu, SessionInfo session)
+    {
+        var style = (Style)FindResource("DarkMenuItemStyle");
+        var assign = new MenuItem
+        {
+            Header = "Assign session to track",
+            Style = style,
+            ItemContainerStyle = style
+        };
+        var current = _trackBySession.TryGetValue(session.FilePath, out var location) ? location : null;
+        foreach (var target in _locations.Where(candidate => !ReferenceEquals(candidate, current))
+                     .OrderBy(candidate => candidate.DisplayName, StringComparer.CurrentCultureIgnoreCase))
+        {
+            var representative = target.Sessions.FirstOrDefault(candidate => !IsCsvSession(candidate)) ??
+                                 target.Sessions.FirstOrDefault();
+            if (representative is null)
+            {
+                continue;
+            }
+
+            var item = new MenuItem
+            {
+                Header = target.DisplayName,
+                Style = style,
+                Tag = new SessionTrackChoice(session.SessionGuid, representative.SessionGuid)
+            };
+            item.Click += AssignSessionTrack_Click;
+            assign.Items.Add(item);
+        }
+
+        if (_viewerSettings.SessionTrackAssignments.ContainsKey(session.SessionGuid))
+        {
+            var reset = new MenuItem
+            {
+                Header = "Use detected track",
+                Style = style,
+                Tag = new SessionTrackChoice(session.SessionGuid, string.Empty)
+            };
+            reset.Click += AssignSessionTrack_Click;
+            assign.Items.Add(new Separator());
+            assign.Items.Add(reset);
+        }
+
+        if (assign.Items.Count > 0)
+        {
+            menu.Items.Add(assign);
+        }
+    }
+
+    private void AssignSessionTrack_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { Tag: SessionTrackChoice choice })
+        {
+            return;
+        }
+
+        var assignments = new Dictionary<string, string>(
+            _viewerSettings.SessionTrackAssignments, StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(choice.TargetSessionGuid))
+        {
+            assignments.Remove(choice.SourceSessionGuid);
+        }
+        else
+        {
+            assignments[choice.SourceSessionGuid] = choice.TargetSessionGuid;
+        }
+
+        var updated = new ViewerSettings
+        {
+            DistanceUnits = _viewerSettings.DistanceUnits,
+            CustomVehicleNames = [.. _viewerSettings.CustomVehicleNames],
+            HiddenVehicleNames = [.. _viewerSettings.HiddenVehicleNames],
+            VehicleMappings = new Dictionary<string, string>(_viewerSettings.VehicleMappings,
+                StringComparer.OrdinalIgnoreCase),
+            SessionVehicleMappings = new Dictionary<string, string>(_viewerSettings.SessionVehicleMappings,
+                StringComparer.OrdinalIgnoreCase),
+            ChannelVisibility = new Dictionary<string, bool>(_viewerSettings.ChannelVisibility,
+                StringComparer.OrdinalIgnoreCase),
+            ChannelOrder = [.. _viewerSettings.ChannelOrder],
+            TrackMappings = new Dictionary<string, string>(_viewerSettings.TrackMappings,
+                StringComparer.OrdinalIgnoreCase),
+            SessionLayoutAssignments = new Dictionary<string, string>(_viewerSettings.SessionLayoutAssignments,
+                StringComparer.OrdinalIgnoreCase),
+            SessionTrackAssignments = assignments
+        };
+        if (!SaveViewerSettings(updated, "Could not save track assignment",
+                "The session's track assignment could not be saved to"))
+        {
+            return;
+        }
+
+        _viewerSettings = updated;
+        BuildTrackLocations();
+        BuildSessionTree();
+        StatusText.Text = string.IsNullOrWhiteSpace(choice.TargetSessionGuid)
+            ? "The session now uses its detected track."
+            : "The session was assigned to the selected track.";
     }
 
     private async void UseSessionFastestAsReference_Click(object sender, RoutedEventArgs e)
@@ -2731,7 +2920,9 @@ public partial class MainWindow : Window
                 ChannelOrder = [.. _viewerSettings.ChannelOrder],
                 TrackMappings = new Dictionary<string, string>(
                     _viewerSettings.TrackMappings, StringComparer.OrdinalIgnoreCase),
-                SessionLayoutAssignments = updatedLayoutAssignments
+                SessionLayoutAssignments = updatedLayoutAssignments,
+                SessionTrackAssignments = new Dictionary<string, string>(
+                    _viewerSettings.SessionTrackAssignments, StringComparer.OrdinalIgnoreCase)
             };
             if (!SaveViewerSettings(
                     updatedSettings, "Could not save track assignment", "The session's track assignment could not be saved to"))
@@ -2785,7 +2976,12 @@ public partial class MainWindow : Window
 
     private string GetVehicleName(SessionInfo session)
     {
-        if (_viewerSettings.SessionVehicleMappings.TryGetValue(session.SessionGuid, out var mappedName))
+        if (_viewerSettings.SessionVehicleMappings.TryGetValue(session.VehicleAssignmentKey, out var mappedName))
+        {
+            return mappedName;
+        }
+
+        if (_viewerSettings.SessionVehicleMappings.TryGetValue(session.SessionGuid, out mappedName))
         {
             return mappedName;
         }

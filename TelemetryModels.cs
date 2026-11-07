@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.IO;
 using System.Runtime.CompilerServices;
 
 namespace TrackTelemetryViewer;
@@ -25,6 +26,7 @@ internal sealed record SessionInfo(
     double OptimalLapStartTimeSessionMs,
     AiMSessionData? AiMData = null)
 {
+    public string VehicleAssignmentKey => Path.GetFullPath(FilePath);
     public string SessionLabel => LocalStart.ToString("h:mm tt");
     public string DateLabel => LocalStart.ToString("MMMM d, yyyy");
     public string CompareLabel => $"{LocalStart:MMM d, yyyy  h:mm tt}";
@@ -37,7 +39,16 @@ internal sealed record AiMSessionData(
     string DriverName,
     string VehicleName,
     string TrackName,
-    IReadOnlyList<AiMLapData> Laps);
+    IReadOnlyList<AiMLapData> Laps,
+    AiMSessionStream? Stream = null);
+
+/// <summary>
+/// The whole logged GPS stream and channels of a GPS logger session, on the same clock as
+/// <see cref="AiMLapData.StartTimeMs"/>, so laps can be re-cut at a different timing line. Released after load.
+/// </summary>
+internal sealed record AiMSessionStream(
+    IReadOnlyList<TelemetryPoint> Points,
+    IReadOnlyList<AiMChannelData> Channels);
 
 internal sealed record AiMLapData(
     int Number,
@@ -81,6 +92,8 @@ internal sealed class ViewerSettings
     public List<string> ChannelOrder { get; set; } = [];
     public Dictionary<string, string> SessionLayoutAssignments { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, string> SessionTrackAssignments { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, string> TrackMappings { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
 }
@@ -101,7 +114,8 @@ internal sealed class TrackAliasSetting(string key, string alias, string default
 
 internal sealed class VehicleVisibilitySetting(string name, bool isHidden) : INotifyPropertyChanged
 {
-    public string Name { get; } = name;
+    public string OriginalName { get; } = name;
+    public string Name { get; set; } = name;
     private bool _isHidden = isHidden;
 
     public bool IsHidden
