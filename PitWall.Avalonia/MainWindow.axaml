@@ -89,7 +89,7 @@
               <Border Classes="panel">
                 <StackPanel>
                   <Grid ColumnDefinitions="*,Auto">
-                    <TextBlock Text="SESSION · LAP" Classes="caption" />
+                    <TextBlock Text="SESSION · LAP" Classes="caption" Foreground="DeepSkyBlue" />
                     <TextBlock x:Name="PrimaryLapTypeText" Grid.Column="1" FontSize="9" FontWeight="Bold"
                                IsVisible="False" />
                   </Grid>
@@ -102,7 +102,7 @@
               <Border Grid.Column="2" Classes="panel">
                 <StackPanel>
                   <Grid ColumnDefinitions="*,Auto">
-                    <TextBlock Text="REFERENCE · LAP" Classes="caption" />
+                    <TextBlock Text="REFERENCE · LAP" Classes="caption" Foreground="Orange" />
                     <TextBlock x:Name="ReferenceLapTypeText" Grid.Column="1" FontSize="9" FontWeight="Bold"
                                IsVisible="False" />
                   </Grid>

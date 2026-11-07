@@ -65,6 +65,7 @@ public sealed partial class MainWindow : Window
             SaveWindowPlacement();
         };
         Trace.CursorChanged += OnCursorChanged;
+        Trace.ChartHeightChanged += OnChartHeightChanged;
         Overview.LapLinkClicked += NavigateToLap;
         SessionTree.SelectionChanged += (_, _) => OnTreeSelectionChanged();
         SessionTree.AddHandler(PointerPressedEvent, OnTreePointerPressed, RoutingStrategies.Tunnel);
@@ -1014,7 +1015,7 @@ public sealed partial class MainWindow : Window
         var segments = _segmentMap is not null && _primary is not null && maxDistance > 0
             ? _segmentMap.ScaledTo(maxDistance)
             : null;
-        Trace.SetData(traces, segments, maxDistance, Imperial, charts, resetCursor);
+        Trace.SetData(traces, segments, maxDistance, Imperial, charts, _model.Settings.ChartHeights, resetCursor);
         UpdateLapCards();
     }
 

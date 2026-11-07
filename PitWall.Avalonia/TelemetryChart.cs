@@ -29,12 +29,41 @@ internal sealed class TelemetryChart : Control
     private IReadOnlyList<ChartLine> _lines = [];
     private IReadOnlyList<double> _segmentBoundariesM = [];
     private double _maxDistanceM = 1;
+    private double _viewStartM;
+    private double _viewEndM = double.NaN; // NaN = the whole lap
     private double _cursorDistanceM = double.NaN;
     private bool _useImperialDistance;
     private List<Action<DrawingContext>>? _cachedStatic;
     private Size _cachedSize;
 
+    // Smallest distance window the wheel can zoom to.
+    public const double MinimumViewSpanM = 30;
+
     public event Action<double>? DistanceHovered;
+
+    /// <summary>Raised when the mouse wheel zooms or pans; the host applies the new window to every chart.</summary>
+    public event Action<double, double>? ViewChangeRequested;
+
+    public double ViewStartM => Math.Clamp(_viewStartM, 0, Math.Max(0, _maxDistanceM - MinimumViewSpanM));
+
+    public double ViewEndM => double.IsFinite(_viewEndM)
+        ? Math.Clamp(_viewEndM, ViewStartM + Math.Min(MinimumViewSpanM, _maxDistanceM), _maxDistanceM)
+        : _maxDistanceM;
+
+    private double ViewSpanM => Math.Max(1e-6, ViewEndM - ViewStartM);
+
+    /// <summary>Shows [startM, endM] of the lap; NaN for <paramref name="endM"/> shows the whole lap.</summary>
+    public void SetView(double startM, double endM)
+    {
+        if (_viewStartM.Equals(startM) && _viewEndM.Equals(endM))
+        {
+            return;
+        }
+
+        _viewStartM = startM;
+        _viewEndM = endM;
+        Invalidate();
+    }
 
     public string Title { get; set; } = string.Empty;
 
@@ -108,17 +137,75 @@ internal sealed class TelemetryChart : Control
         InvalidateVisual();
     }
 
+    private static Rect PlotRect(Size size) =>
+        new(55, 42, Math.Max(1, size.Width - 70), Math.Max(1, size.Height - 78));
+
+    private double DistanceToX(double distanceM, Rect plot) =>
+        plot.Left + (distanceM - ViewStartM) / ViewSpanM * plot.Width;
+
+    private double XToDistance(double x, Rect plot) =>
+        Math.Clamp(ViewStartM + (x - plot.Left) / plot.Width * ViewSpanM, 0, _maxDistanceM);
+
+    // Axis unit for the visible span: miles/km for the lap, feet/metres once zoomed in close.
+    private (double MetersPerUnit, string Name, string Format) DistanceAxisUnit()
+    {
+        if (UseImperialDistance)
+        {
+            return ViewSpanM < 0.5 * 1609.344
+                ? (0.3048, "ft", "0")
+                : (1609.344, "mi", ViewSpanM < 3 * 1609.344 ? "0.00" : "0.0");
+        }
+
+        return ViewSpanM < 1000 ? (1, "m", "0") : (1000, "km", ViewSpanM < 3000 ? "0.00" : "0.0");
+    }
+
     protected override void OnPointerMoved(PointerEventArgs e)
     {
         base.OnPointerMoved(e);
-        var plotWidth = Bounds.Width - 70;
-        if (plotWidth <= 0)
+        if (Bounds.Width - 70 <= 0)
         {
             return;
         }
 
-        var x = e.GetPosition(this).X;
-        DistanceHovered?.Invoke(Math.Clamp((x - 55) / plotWidth * _maxDistanceM, 0, _maxDistanceM));
+        DistanceHovered?.Invoke(XToDistance(e.GetPosition(this).X, PlotRect(Bounds.Size)));
+    }
+
+    // Wheel zooms the distance axis around the pointer; Shift+wheel (or a horizontal wheel/trackpad swipe) pans.
+    // The host applies the result to every chart.
+    protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
+    {
+        base.OnPointerWheelChanged(e);
+        if (Bounds.Width - 70 <= 0 || _maxDistanceM <= MinimumViewSpanM)
+        {
+            return;
+        }
+
+        var start = ViewStartM;
+        var span = ViewSpanM;
+        var wholeLap = span >= _maxDistanceM - 0.5;
+        // macOS turns Shift+wheel into a horizontal delta, so treat either as a pan.
+        var pan = e.KeyModifiers.HasFlag(KeyModifiers.Shift) || (e.Delta.Y == 0 && e.Delta.X != 0);
+        var notches = pan ? (e.Delta.Y != 0 ? e.Delta.Y : e.Delta.X) : e.Delta.Y;
+        if (notches == 0 || (pan && wholeLap) || (!pan && notches < 0 && wholeLap))
+        {
+            return; // nothing to zoom out of or pan: let the wheel scroll the chart list instead
+        }
+
+        if (pan)
+        {
+            start -= notches * span * 0.15;
+        }
+        else
+        {
+            var pivot = XToDistance(e.GetPosition(this).X, PlotRect(Bounds.Size));
+            var newSpan = Math.Clamp(span * Math.Pow(0.8, notches), MinimumViewSpanM, _maxDistanceM);
+            start = pivot - (pivot - start) * newSpan / span;
+            span = newSpan;
+        }
+
+        start = Math.Clamp(start, 0, _maxDistanceM - span);
+        ViewChangeRequested?.Invoke(start, span >= _maxDistanceM - 0.5 ? double.NaN : start + span);
+        e.Handled = true; // don't also scroll the chart list
     }
 
     public override void Render(DrawingContext context)
@@ -139,10 +226,10 @@ internal sealed class TelemetryChart : Control
         }
 
         DrawCursorValues(context);
-        if (double.IsFinite(_cursorDistanceM) && _cursorDistanceM >= 0 && _cursorDistanceM <= _maxDistanceM)
+        if (double.IsFinite(_cursorDistanceM) && _cursorDistanceM >= ViewStartM && _cursorDistanceM <= ViewEndM)
         {
-            var plot = new Rect(55, 42, Math.Max(1, size.Width - 70), Math.Max(1, size.Height - 78));
-            var x = plot.Left + _cursorDistanceM / _maxDistanceM * plot.Width;
+            var plot = PlotRect(size);
+            var x = DistanceToX(_cursorDistanceM, plot);
             context.DrawLine(CursorPen, new Point(x, plot.Top), new Point(x, plot.Bottom));
         }
     }
@@ -180,11 +267,22 @@ internal sealed class TelemetryChart : Control
             legendX += Math.Max(48, line.Label.Length * 5.2) + 17;
         }
 
-        var plot = new Rect(55, 42, Math.Max(1, width - 70), Math.Max(1, height - 78));
+        var plot = PlotRect(size);
+        // Fit the vertical range to what is visible, so zooming in on a corner also zooms its values.
+        var viewStart = ViewStartM;
+        var viewEnd = ViewEndM;
         var values = _lines.SelectMany(line => line.Values)
-            .Where(value => double.IsFinite(value.Value))
+            .Where(value => double.IsFinite(value.Value) && value.DistanceM >= viewStart && value.DistanceM <= viewEnd)
             .Select(value => value.Value)
             .ToArray();
+        if (values.Length == 0)
+        {
+            values = _lines.SelectMany(line => line.Values)
+                .Where(value => double.IsFinite(value.Value))
+                .Select(value => value.Value)
+                .ToArray();
+        }
+
         if (values.Length == 0)
         {
             var empty = Text("No samples available", TextBrush, 11);
@@ -257,24 +355,28 @@ internal sealed class TelemetryChart : Control
             }
         }
 
+        var axisUnit = DistanceAxisUnit();
         for (var tick = 0; tick <= 5; tick++)
         {
             var x = plot.Left + plot.Width * tick / 5;
-            var distance = _maxDistanceM * tick / 5 / (UseImperialDistance ? 1609.344 : 1000);
-            var label = Text($"{distance:0.0}", TextBrush, 9);
+            var distance = (viewStart + (viewEnd - viewStart) * tick / 5) / axisUnit.MetersPerUnit;
+            var label = Text(distance.ToString(axisUnit.Format, CultureInfo.InvariantCulture), TextBrush, 9);
             ops.Add(context =>
             {
                 context.DrawLine(GridPen, new Point(x, plot.Top), new Point(x, plot.Bottom));
-                context.DrawText(label, new Point(x - 12, plot.Bottom + 5));
+                context.DrawText(label, new Point(x - label.Width / 2, plot.Bottom + 5));
             });
         }
 
-        var distanceLabel = Text(UseImperialDistance ? "Distance (mi)" : "Distance (km)", TextBrush, 9);
-        ops.Add(context => context.DrawText(distanceLabel, new Point(plot.Left + plot.Width / 2 - 33, height - 15)));
+        var distanceLabel = Text(viewEnd - viewStart < _maxDistanceM - 0.5
+            ? $"Distance ({axisUnit.Name})  ·  zoomed — scroll wheel to zoom, Shift+wheel or the scrollbar to pan"
+            : $"Distance ({axisUnit.Name})", TextBrush, 9);
+        ops.Add(context => context.DrawText(distanceLabel,
+            new Point(plot.Left + plot.Width / 2 - distanceLabel.Width / 2, height - 15)));
 
         var boundaries = _segmentBoundariesM
-            .Where(boundary => boundary > 0 && boundary < _maxDistanceM)
-            .Select(boundary => plot.Left + boundary / _maxDistanceM * plot.Width)
+            .Where(boundary => boundary > viewStart && boundary < viewEnd)
+            .Select(boundary => DistanceToX(boundary, plot))
             .ToArray();
         var zeroY = plot.Bottom - (0 - min) / (max - min) * plot.Height;
         var lineGeometries = _lines.Select(line => (
@@ -309,9 +411,17 @@ internal sealed class TelemetryChart : Control
         using (var context = geometry.Open())
         {
             var drawing = false;
-            foreach (var point in values)
+            var viewStart = ViewStartM;
+            var viewEnd = ViewEndM;
+            for (var index = 0; index < values.Count; index++)
             {
-                if (!double.IsFinite(point.Value) || !double.IsFinite(point.DistanceM))
+                var point = values[index];
+                // Skip what's off-screen, keeping one point either side so lines run to the plot edges.
+                var invalid = !double.IsFinite(point.Value) || !double.IsFinite(point.DistanceM);
+                var offScreen = !invalid &&
+                    ((point.DistanceM < viewStart && index + 1 < values.Count && values[index + 1].DistanceM < viewStart) ||
+                     (point.DistanceM > viewEnd && index > 0 && values[index - 1].DistanceM > viewEnd));
+                if (invalid || offScreen)
                 {
                     if (drawing)
                     {
@@ -323,7 +433,7 @@ internal sealed class TelemetryChart : Control
                 }
 
                 var position = new Point(
-                    plot.Left + point.DistanceM / _maxDistanceM * plot.Width,
+                    DistanceToX(point.DistanceM, plot),
                     plot.Bottom - (point.Value - min) / (max - min) * plot.Height);
                 if (!drawing)
                 {

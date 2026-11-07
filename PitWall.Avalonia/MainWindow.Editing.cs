@@ -224,6 +224,20 @@ public sealed partial class MainWindow
         return true;
     }
 
+    // A chart's bottom edge was dragged: remember its height (shared with the Windows app's settings file).
+    private void OnChartHeightChanged(string chartKey, double height)
+    {
+        var updated = SettingsStore.Clone(_model.Settings);
+        updated.ChartHeights[chartKey] = height;
+        if (_dataFolder is null)
+        {
+            _model.Settings = updated;
+            return;
+        }
+
+        SaveSettings(updated, "Could not save chart size");
+    }
+
     private async Task AssignLayout(TrackLocation location, string layoutName)
     {
         var updated = SettingsStore.Clone(_model.Settings);
