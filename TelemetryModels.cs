@@ -97,6 +97,9 @@ internal sealed class ViewerSettings
         new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, string> TrackMappings { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
+    // Chart heights (device-independent pixels) by chart channel key, set by dragging a chart's bottom edge.
+    public Dictionary<string, double> ChartHeights { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
 }
 
 internal sealed class VehicleAliasSetting(string alias, string vehicleName)

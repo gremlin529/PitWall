@@ -30,7 +30,8 @@ internal static class SettingsStore
             source.SessionLayoutAssignments, StringComparer.OrdinalIgnoreCase),
         SessionTrackAssignments = new Dictionary<string, string>(
             source.SessionTrackAssignments, StringComparer.OrdinalIgnoreCase),
-        TrackMappings = new Dictionary<string, string>(source.TrackMappings, StringComparer.OrdinalIgnoreCase)
+        TrackMappings = new Dictionary<string, string>(source.TrackMappings, StringComparer.OrdinalIgnoreCase),
+        ChartHeights = new Dictionary<string, double>(source.ChartHeights, StringComparer.OrdinalIgnoreCase)
     };
 
     public static ViewerSettings Load(string dataFolder, List<string> warnings)
@@ -73,6 +74,15 @@ internal static class SettingsStore
                 if (loaded.ChannelOrder is { Count: > 0 })
                 {
                     settings.ChannelOrder = loaded.ChannelOrder.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                }
+
+                // Written by the Windows app; kept so saving here doesn't drop them.
+                foreach (var (key, height) in loaded.ChartHeights ?? [])
+                {
+                    if (!string.IsNullOrWhiteSpace(key) && double.IsFinite(height) && height > 0)
+                    {
+                        settings.ChartHeights[key] = height;
+                    }
                 }
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or

@@ -233,7 +233,9 @@ public partial class MainWindow
             SessionLayoutAssignments = new Dictionary<string, string>(
                 _viewerSettings.SessionLayoutAssignments, StringComparer.OrdinalIgnoreCase),
             SessionTrackAssignments = new Dictionary<string, string>(
-                _viewerSettings.SessionTrackAssignments, StringComparer.OrdinalIgnoreCase)
+                _viewerSettings.SessionTrackAssignments, StringComparer.OrdinalIgnoreCase),
+            ChartHeights = new Dictionary<string, double>(
+                _viewerSettings.ChartHeights, StringComparer.OrdinalIgnoreCase)
         };
         var settingsPath = GetViewerSettingsPath();
         try

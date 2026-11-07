@@ -309,7 +309,9 @@ public partial class SettingsWindow : Window
             SessionLayoutAssignments = new Dictionary<string, string>(
                 Settings.SessionLayoutAssignments, StringComparer.OrdinalIgnoreCase),
             SessionTrackAssignments = new Dictionary<string, string>(
-                Settings.SessionTrackAssignments, StringComparer.OrdinalIgnoreCase)
+                Settings.SessionTrackAssignments, StringComparer.OrdinalIgnoreCase),
+            ChartHeights = new Dictionary<string, double>(
+                Settings.ChartHeights, StringComparer.OrdinalIgnoreCase)
         };
         DialogResult = true;
     }

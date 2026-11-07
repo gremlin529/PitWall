@@ -4,6 +4,7 @@ using System.IO;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using Microsoft.Win32;
@@ -549,6 +550,10 @@ public partial class MainWindow : Window
         }
     }
 
+    private const double DefaultChartHeight = 190;
+    private const double MinimumChartHeight = 110;
+    private const double MaximumChartHeight = 900;
+
     private void RebuildTelemetryCharts()
     {
         ChartListPanel.Children.Clear();
@@ -561,22 +566,128 @@ public partial class MainWindow : Window
                 continue;
             }
 
-            ChartListPanel.Children.Add(new Border
-            {
-                Background = (Brush)FindResource("PanelBrush"),
-                CornerRadius = new CornerRadius(8),
-                ClipToBounds = true,
-                Height = 190,
-                Margin = new Thickness(0, 0, 0, 9),
-                Child = chart
-            });
+            ChartListPanel.Children.Add(CreateResizableChartHost(channel.Key, chart));
         }
 
         ApplyDistanceUnits();
+        ApplyChartView();
         if (_primaryTrace is not null)
         {
             UpdateCharts();
         }
+    }
+
+    // A chart in a panel whose bottom edge can be dragged to change its height; the height is saved per chart.
+    private Border CreateResizableChartHost(string chartKey, TelemetryChart chart)
+    {
+        var height = _viewerSettings.ChartHeights.TryGetValue(chartKey, out var saved) && double.IsFinite(saved)
+            ? Math.Clamp(saved, MinimumChartHeight, MaximumChartHeight)
+            : DefaultChartHeight;
+        var grip = new Thumb
+        {
+            Height = 7,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Cursor = Cursors.SizeNS,
+            ToolTip = "Drag to resize this chart",
+            Template = CreateResizeGripTemplate()
+        };
+        var host = new Border
+        {
+            Background = (Brush)FindResource("PanelBrush"),
+            CornerRadius = new CornerRadius(8),
+            ClipToBounds = true,
+            Height = height,
+            Margin = new Thickness(0, 0, 0, 9),
+            Child = new Grid { Children = { chart, grip } }
+        };
+        grip.DragDelta += (_, eventArgs) =>
+            host.Height = Math.Clamp(host.Height + eventArgs.VerticalChange, MinimumChartHeight, MaximumChartHeight);
+        grip.DragCompleted += (_, _) =>
+        {
+            _viewerSettings.ChartHeights[chartKey] = Math.Round(host.Height);
+            SaveViewerSettings(_viewerSettings, "Could not save chart size", "The chart size could not be saved to");
+        };
+        return host;
+    }
+
+    // An invisible grip with a faint line that brightens under the mouse.
+    private static ControlTemplate CreateResizeGripTemplate()
+    {
+        var line = new FrameworkElementFactory(typeof(Border));
+        line.Name = "GripLine";
+        line.SetValue(FrameworkElement.HeightProperty, 2.0);
+        line.SetValue(FrameworkElement.WidthProperty, 36.0);
+        line.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+        line.SetValue(Border.CornerRadiusProperty, new CornerRadius(1));
+        line.SetValue(Border.BackgroundProperty, new SolidColorBrush(Color.FromArgb(90, 144, 157, 171)));
+        var area = new FrameworkElementFactory(typeof(Border));
+        area.SetValue(Border.BackgroundProperty, Brushes.Transparent);
+        area.AppendChild(line);
+        var template = new ControlTemplate(typeof(Thumb)) { VisualTree = area };
+        var hover = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+        hover.Setters.Add(new Setter(Border.BackgroundProperty,
+            new SolidColorBrush(Color.FromArgb(220, 236, 187, 83)), "GripLine"));
+        template.Triggers.Add(hover);
+        return template;
+    }
+
+    // The distance window every chart shows: [start, end] metres, or the whole lap when end is NaN.
+    private double _chartViewStartM;
+    private double _chartViewEndM = double.NaN;
+    private bool _updatingChartScrollBar;
+
+    private void SetChartView(double startM, double endM)
+    {
+        _chartViewStartM = startM;
+        _chartViewEndM = endM;
+        ApplyChartView();
+    }
+
+    // Picking a lap shows the whole lap again.
+    private void ResetChartView() => SetChartView(0, double.NaN);
+
+    private void ApplyChartView()
+    {
+        foreach (var chart in _chartElements.Values)
+        {
+            chart.SetView(_chartViewStartM, _chartViewEndM);
+        }
+
+        UpdateChartScrollBar();
+    }
+
+    private void UpdateChartScrollBar()
+    {
+        var chart = _chartElements.Values.FirstOrDefault();
+        var maxDistance = chart?.MaxDistanceM ?? 0;
+        var start = chart?.ViewStartM ?? 0;
+        var span = chart is null ? 0 : chart.ViewEndM - start;
+        var zoomed = chart is not null && double.IsFinite(_chartViewEndM) && span < maxDistance - 0.5;
+        ChartDistanceScrollBar.Visibility = zoomed ? Visibility.Visible : Visibility.Collapsed;
+        if (!zoomed)
+        {
+            return;
+        }
+
+        _updatingChartScrollBar = true;
+        ChartDistanceScrollBar.Minimum = 0;
+        ChartDistanceScrollBar.Maximum = maxDistance - span;
+        ChartDistanceScrollBar.ViewportSize = span;
+        ChartDistanceScrollBar.SmallChange = span * 0.05;
+        ChartDistanceScrollBar.LargeChange = span * 0.9;
+        ChartDistanceScrollBar.Value = start;
+        _updatingChartScrollBar = false;
+    }
+
+    private void ChartDistanceScrollBar_Scroll(object sender, ScrollEventArgs e)
+    {
+        if (_updatingChartScrollBar || !double.IsFinite(_chartViewEndM))
+        {
+            return;
+        }
+
+        var span = _chartViewEndM - _chartViewStartM;
+        SetChartView(e.NewValue, e.NewValue + span);
     }
 
     private TelemetryChart GetOrCreateChart(ChartChannelSetting channel)
@@ -606,6 +717,7 @@ public partial class MainWindow : Window
             SymmetricRange = channel.Key is "combined-g" or "longitudinal-g" or "lateral-g" or "delta-time"
         };
         chart.DistanceHovered += Chart_DistanceHovered;
+        chart.ViewChangeRequested += SetChartView;
         _chartElements.Add(channel.Key, chart);
         return chart;
     }
@@ -697,6 +809,14 @@ public partial class MainWindow : Window
                     _viewerSettings.ChannelOrder = loadedSettings.ChannelOrder
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .ToList();
+                }
+
+                foreach (var (chartKey, height) in loadedSettings.ChartHeights ?? [])
+                {
+                    if (!string.IsNullOrWhiteSpace(chartKey) && double.IsFinite(height) && height > 0)
+                    {
+                        _viewerSettings.ChartHeights[chartKey] = height;
+                    }
                 }
 
                 foreach (var (alias, vehicleName) in loadedSettings.VehicleMappings ?? [])
@@ -1203,7 +1323,9 @@ public partial class MainWindow : Window
                 _viewerSettings.TrackMappings, StringComparer.OrdinalIgnoreCase),
             SessionLayoutAssignments = assignments,
             SessionTrackAssignments = new Dictionary<string, string>(
-                _viewerSettings.SessionTrackAssignments, StringComparer.OrdinalIgnoreCase)
+                _viewerSettings.SessionTrackAssignments, StringComparer.OrdinalIgnoreCase),
+            ChartHeights = new Dictionary<string, double>(
+                _viewerSettings.ChartHeights, StringComparer.OrdinalIgnoreCase)
         };
         var settingsPath = GetViewerSettingsPath();
         try
@@ -1886,7 +2008,9 @@ public partial class MainWindow : Window
             SessionLayoutAssignments = new Dictionary<string, string>(
                 _viewerSettings.SessionLayoutAssignments, StringComparer.OrdinalIgnoreCase),
             SessionTrackAssignments = new Dictionary<string, string>(
-                _viewerSettings.SessionTrackAssignments, StringComparer.OrdinalIgnoreCase)
+                _viewerSettings.SessionTrackAssignments, StringComparer.OrdinalIgnoreCase),
+            ChartHeights = new Dictionary<string, double>(
+                _viewerSettings.ChartHeights, StringComparer.OrdinalIgnoreCase)
         };
         var mappingPath = GetViewerSettingsPath();
         try
@@ -2199,7 +2323,9 @@ public partial class MainWindow : Window
                 StringComparer.OrdinalIgnoreCase),
             SessionLayoutAssignments = new Dictionary<string, string>(_viewerSettings.SessionLayoutAssignments,
                 StringComparer.OrdinalIgnoreCase),
-            SessionTrackAssignments = assignments
+            SessionTrackAssignments = assignments,
+            ChartHeights = new Dictionary<string, double>(
+                _viewerSettings.ChartHeights, StringComparer.OrdinalIgnoreCase)
         };
         if (!SaveViewerSettings(updated, "Could not save track assignment",
                 "The session's track assignment could not be saved to"))
@@ -2365,6 +2491,7 @@ public partial class MainWindow : Window
             }
 
             _cursorDistanceM = 0;
+            ResetChartView();
             UpdateCharts();
             UpdateStatistics();
             StatusText.Text =
@@ -2483,6 +2610,7 @@ public partial class MainWindow : Window
             };
         }
 
+        ApplyChartView();
         SetCursorDistance(_cursorDistanceM);
         UpdateReferenceHeader();
     }
@@ -2930,7 +3058,9 @@ public partial class MainWindow : Window
                     _viewerSettings.TrackMappings, StringComparer.OrdinalIgnoreCase),
                 SessionLayoutAssignments = updatedLayoutAssignments,
                 SessionTrackAssignments = new Dictionary<string, string>(
-                    _viewerSettings.SessionTrackAssignments, StringComparer.OrdinalIgnoreCase)
+                    _viewerSettings.SessionTrackAssignments, StringComparer.OrdinalIgnoreCase),
+                ChartHeights = new Dictionary<string, double>(
+                    _viewerSettings.ChartHeights, StringComparer.OrdinalIgnoreCase)
             };
             if (!SaveViewerSettings(
                     updatedSettings, "Could not save track assignment", "The session's track assignment could not be saved to"))
