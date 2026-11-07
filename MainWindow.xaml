@@ -305,14 +305,14 @@
                         </Grid.RowDefinitions>
                         <Border Grid.Column="0" Background="{StaticResource PanelBrush}" CornerRadius="8"
                                 ClipToBounds="True">
-                            <local:TrackMap x:Name="TrackMapView"/>
+                            <local:TrackMap x:Name="TrackMapView" MouseWheel="TrackMapView_MouseWheel"/>
                         </Border>
                         <Grid Grid.Column="2">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="*"/>
                                 <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
-                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <ScrollViewer x:Name="ChartScrollViewer" VerticalScrollBarVisibility="Auto">
                                 <StackPanel x:Name="ChartListPanel"/>
                             </ScrollViewer>
                             <!-- Pans the distance axis of every chart once zoomed in with the mouse wheel. -->
@@ -321,7 +321,7 @@
                                        Scroll="ChartDistanceScrollBar_Scroll"/>
                         </Grid>
                         <TextBlock Grid.Row="1" Grid.ColumnSpan="3"
-                                   Text="Move over any chart to inspect the same distance on the GPS trace and other plots. Scroll the wheel over a chart to zoom; drag a chart's bottom edge to resize it."
+                                   Text="Move over any chart to inspect the same distance on the GPS trace and other plots. Scroll the wheel over a chart to zoom, or over the map to scroll the charts; drag a chart's bottom edge to resize it."
                                    FontSize="10" Foreground="{StaticResource MutedBrush}"
                                    VerticalAlignment="Bottom" Margin="0,8,0,0"/>
                     </Grid>
@@ -501,8 +501,16 @@
 
         <Border Grid.Row="2" Background="#171E25" BorderBrush="#28323D" BorderThickness="0,1,0,0">
             <Grid Margin="20,0">
-                <TextBlock x:Name="StatusText" Text="Ready" FontSize="10"
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock x:Name="StatusText" Text="Ready" FontSize="10" TextTrimming="CharacterEllipsis"
                            Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"/>
+                <!-- Progress of the background elevation refinement. -->
+                <TextBlock x:Name="ElevationStatusText" Grid.Column="1" FontSize="10" Margin="16,0,0,0"
+                           Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center"
+                           Visibility="Collapsed"/>
             </Grid>
         </Border>
     </Grid>

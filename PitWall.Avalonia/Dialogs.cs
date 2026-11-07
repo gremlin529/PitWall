@@ -202,6 +202,7 @@ internal sealed class SettingsWindow : Window
         Title = "Settings";
         _channels = channels.ToList();
         RebuildChannelRows();
+        _channelFilter.TextChanged += (_, _) => RebuildChannelRows();
         Width = 640;
         Height = 560;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
@@ -299,9 +300,12 @@ internal sealed class SettingsWindow : Window
                         {
                             Dock(new TextBlock
                             {
-                                Text = "Choose which plots are shown and their order.",
+                                Text = "Choose which plots are shown and their order. " +
+                                       "The data each channel comes from is shown in brackets.",
+                                TextWrapping = Avalonia.Media.TextWrapping.Wrap,
                                 Margin = new Thickness(0, 0, 0, 8)
                             }, Avalonia.Controls.Dock.Top),
+                            Dock(_channelFilter, Avalonia.Controls.Dock.Top),
                             new ScrollViewer { Content = _channelList }
                         }
                     }
@@ -363,19 +367,30 @@ internal sealed class SettingsWindow : Window
     private readonly List<ChartChannelSetting> _channels;
     private readonly StackPanel _channelList = new() { Spacing = 2 };
 
+    private readonly TextBox _channelFilter = new()
+    {
+        Watermark = "Filter channels…",
+        Margin = new Thickness(0, 0, 0, 8)
+    };
+
     private void RebuildChannelRows()
     {
         _channelList.Children.Clear();
-        for (var index = 0; index < _channels.Count; index++)
+        var filter = _channelFilter.Text ?? string.Empty;
+        var visible = Enumerable.Range(0, _channels.Count).Where(index => _channels[index].MatchesFilter(filter)).ToArray();
+        for (var row = 0; row < visible.Length; row++)
         {
-            var channel = _channels[index];
-            var position = index;
-            var check = new CheckBox { Content = channel.Name, IsChecked = channel.IsEnabled, MinWidth = 320 };
+            var channel = _channels[visible[row]];
+            var position = visible[row];
+            // While filtered, a row swaps with its visible neighbour rather than a hidden one.
+            var above = row > 0 ? visible[row - 1] : -1;
+            var below = row < visible.Length - 1 ? visible[row + 1] : -1;
+            var check = new CheckBox { Content = channel.PickerLabel, IsChecked = channel.IsEnabled, MinWidth = 320 };
             check.IsCheckedChanged += (_, _) => channel.IsEnabled = check.IsChecked == true;
-            var up = new Button { Content = "▲", IsEnabled = index > 0 };
-            up.Click += (_, _) => MoveChannel(position, -1);
-            var down = new Button { Content = "▼", IsEnabled = index < _channels.Count - 1 };
-            down.Click += (_, _) => MoveChannel(position, 1);
+            var up = new Button { Content = "▲", IsEnabled = above >= 0 };
+            up.Click += (_, _) => MoveChannel(position, above - position);
+            var down = new Button { Content = "▼", IsEnabled = below >= 0 };
+            down.Click += (_, _) => MoveChannel(position, below - position);
             _channelList.Children.Add(new StackPanel
             {
                 Orientation = Orientation.Horizontal,

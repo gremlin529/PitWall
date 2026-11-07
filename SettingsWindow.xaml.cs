@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Windows.Controls;
 using System.Windows;
+using System.Windows.Data;
 using System.Windows.Media;
 using System.Windows.Threading;
 
@@ -149,6 +150,14 @@ public partial class SettingsWindow : Window
         _vehicleChoices.Insert(index, name);
     }
 
+    private void ChannelFilterBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        var filter = ChannelFilterBox.Text;
+        CollectionViewSource.GetDefaultView(_channels).Filter = string.IsNullOrWhiteSpace(filter)
+            ? null
+            : item => item is ChartChannelSetting channel && channel.MatchesFilter(filter);
+    }
+
     private void MoveChannelUp_Click(object sender, RoutedEventArgs e) =>
         MoveChannel(sender, -1);
 
@@ -163,7 +172,14 @@ public partial class SettingsWindow : Window
         }
 
         var index = _channels.IndexOf(channel);
+        // While filtered, step past hidden channels so the row swaps with its visible neighbour.
+        var filter = ChannelFilterBox.Text;
         var targetIndex = index + offset;
+        while (targetIndex >= 0 && targetIndex < _channels.Count && !_channels[targetIndex].MatchesFilter(filter))
+        {
+            targetIndex += offset;
+        }
+
         if (index < 0 || targetIndex < 0 || targetIndex >= _channels.Count)
         {
             return;

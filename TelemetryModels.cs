@@ -71,6 +71,78 @@ internal sealed class ChartChannelSetting(string key, string name, string units,
     public string Name { get; } = name;
     public string Units { get; } = units;
     public bool IsEnabled { get; set; } = isEnabled;
+
+    // Which kinds of data provide this channel, e.g. "Catalyst, AiM"; empty when unknown.
+    public string Sources { get; set; } = string.Empty;
+
+    public string PickerLabel => string.IsNullOrEmpty(Sources) ? Name : $"{Name}  ({Sources})";
+
+    public bool MatchesFilter(string filter) =>
+        string.IsNullOrWhiteSpace(filter) ||
+        filter.Split(' ', StringSplitOptions.RemoveEmptyEntries).All(term =>
+            Name.Contains(term, StringComparison.CurrentCultureIgnoreCase) ||
+            Sources.Contains(term, StringComparison.CurrentCultureIgnoreCase));
+}
+
+/// <summary>Labels chart channels with the kinds of session data they come from (Catalyst, AiM, VBox).</summary>
+internal static class ChannelSources
+{
+    public const string LoggerKeyPrefix = "aim:";
+    private static readonly string[] Order = ["Catalyst", "AiM", "VBox"];
+
+    public static string Of(SessionInfo session) =>
+        Path.GetExtension(session.FilePath).Equals(".vbo", StringComparison.OrdinalIgnoreCase) ? "VBox"
+        : session.AiMData is not null ? "AiM"
+        : "Catalyst";
+
+    /// <summary>
+    /// Source labels by channel key: logger channels ("aim:Name") get the sources whose files contain them; every
+    /// other key (speed, G, delta) is available from every loaded source and uses <c>""</c> as its entry.
+    /// </summary>
+    public static IReadOnlyDictionary<string, string> Discover(IEnumerable<SessionInfo> sessions)
+    {
+        var all = new HashSet<string>();
+        var byChannel = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var session in sessions)
+        {
+            var source = Of(session);
+            all.Add(source);
+            if (session.AiMData is null)
+            {
+                continue;
+            }
+
+            foreach (var name in session.AiMData.Laps.SelectMany(lap => lap.Channels).Select(channel => channel.Name)
+                         .Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                var key = LoggerKeyPrefix + name;
+                if (!byChannel.TryGetValue(key, out var set))
+                {
+                    byChannel[key] = set = [];
+                }
+
+                set.Add(source);
+            }
+        }
+
+        var result = byChannel.ToDictionary(item => item.Key, item => Join(item.Value), StringComparer.OrdinalIgnoreCase);
+        result[string.Empty] = Join(all);
+        return result;
+    }
+
+    public static void Apply(IEnumerable<ChartChannelSetting> channels, IReadOnlyDictionary<string, string> sources)
+    {
+        foreach (var channel in channels)
+        {
+            channel.Sources = sources.TryGetValue(channel.Key, out var label)
+                ? label
+                : channel.Key.StartsWith(LoggerKeyPrefix, StringComparison.OrdinalIgnoreCase)
+                    ? string.Empty
+                    : sources.GetValueOrDefault(string.Empty, string.Empty);
+        }
+    }
+
+    private static string Join(IReadOnlySet<string> sources) => string.Join(", ", Order.Where(sources.Contains));
 }
 
 internal sealed record SessionEdits(

@@ -15,6 +15,60 @@ public sealed partial class MainWindow
     private TrackLocation? _overviewLocation;
     private IReadOnlyList<SessionInfo> _overviewSessions = [];
     private string? _overviewGroup;
+    private IReadOnlyList<TrackPoint> _overviewOutline = [];
+    private TrackSegmentMap? _overviewSegments;
+    private CancellationTokenSource? _elevationCancellation;
+
+    // After a folder loads, refine each track's elevation profile from its sessions in the background.
+    private void StartElevationRefinement()
+    {
+        _elevationCancellation?.Cancel();
+        var cancellation = _elevationCancellation = new CancellationTokenSource();
+        _ = TrackElevation.RunInBackground(_model.Locations, location =>
+        {
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (cancellation.IsCancellationRequested || _overviewLocation?.Key != location.Key ||
+                    !Overview.IsVisible || _overviewOutline.Count == 0)
+                {
+                    return;
+                }
+
+                var outline = _overviewOutline;
+                var segments = _overviewSegments;
+                var generation = _overviewGeneration;
+                _ = Task.Run(() => TrackElevation.Apply(location, outline)).ContinueWith(task =>
+                {
+                    if (task.IsCompletedSuccessfully && generation == _overviewGeneration)
+                    {
+                        Overview.SetMap(task.Result, segments);
+                    }
+                }, TaskScheduler.FromCurrentSynchronizationContext());
+            });
+        }, progress => Dispatcher.UIThread.Post(() => ShowElevationProgress(progress, cancellation)),
+            cancellation.Token);
+    }
+
+    private void ShowElevationProgress(ElevationProgress progress, CancellationTokenSource cancellation)
+    {
+        if (cancellation.IsCancellationRequested)
+        {
+            return;
+        }
+
+        ElevationStatusText.Text = progress.Text;
+        ElevationStatusText.IsVisible = true;
+        if (progress.Finished)
+        {
+            _ = Task.Delay(TimeSpan.FromSeconds(10)).ContinueWith(_ =>
+            {
+                if (_elevationCancellation == cancellation)
+                {
+                    ElevationStatusText.IsVisible = false;
+                }
+            }, TaskScheduler.FromCurrentSynchronizationContext());
+        }
+    }
 
     private string FormatTrackLength(double distanceM) => Imperial
         ? $"{distanceM / 1609.344:0.00} mi"
@@ -101,7 +155,17 @@ public sealed partial class MainWindow
                 return;
             }
 
-            Overview.SetMap(meanline, segments);
+            // Use the refined elevation profile for this track once the background pass has built one.
+            var baseOutline = meanline;
+            var refined = await Task.Run(() => TrackElevation.Apply(location, baseOutline));
+            if (generation != _overviewGeneration)
+            {
+                return;
+            }
+
+            _overviewOutline = baseOutline;
+            _overviewSegments = segments;
+            Overview.SetMap(refined, segments);
             var finished = false;
             var progress = new Progress<int>(completed =>
             {

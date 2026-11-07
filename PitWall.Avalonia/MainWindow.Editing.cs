@@ -477,9 +477,11 @@ public sealed partial class MainWindow
         var vehicleNames = _model.Catalog.Names.Concat(_model.Settings.CustomVehicleNames)
             .Concat(_model.Settings.VehicleMappings.Values);
         var previous = _model.Settings;
+        var pickerChannels = ChannelCatalog.Build(_aimChannels, _model.Settings);
+        ChannelSources.Apply(pickerChannels, ChannelSources.Discover(_model.Sessions));
         var dialog = new SettingsWindow(
             _model.Settings, aliases, _model.BuildTrackAliasSettings(), vehicleNames, _model.Catalog.Names,
-            ChannelCatalog.Build(_aimChannels, _model.Settings));
+            pickerChannels);
         if (await dialog.ShowDialog<ViewerSettings?>(this) is not { } updated ||
             !SaveSettings(updated, "Could not save settings"))
         {

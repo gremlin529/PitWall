@@ -167,15 +167,34 @@
                 <Grid Margin="10">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
                     <StackPanel Margin="0,0,0,8">
                         <TextBlock Text="TELEMETRY GRAPHS" FontSize="10" FontWeight="Bold"
                                    Foreground="#94A0AD"/>
-                        <TextBlock Text="Choose which distance-based graphs appear on the main page."
-                                   Foreground="#94A0AD" FontSize="10" Margin="0,4,0,0"/>
+                        <TextBlock Text="Choose which distance-based graphs appear on the main page. The data each channel comes from is shown in brackets."
+                                   Foreground="#94A0AD" FontSize="10" Margin="0,4,0,0" TextWrapping="Wrap"/>
                     </StackPanel>
-                    <ListBox x:Name="ChannelList" Grid.Row="1"
+                    <Grid Grid.Row="1" Margin="0,0,0,8">
+                        <TextBox x:Name="ChannelFilterBox" TextChanged="ChannelFilterBox_TextChanged"
+                                 Padding="6,4" VerticalContentAlignment="Center"
+                                 ToolTip="Type to filter channels by name or source (Catalyst, AiM, VBox)"/>
+                        <TextBlock Text="Filter channels…" IsHitTestVisible="False" Margin="9,0,0,0"
+                                   VerticalAlignment="Center" Foreground="#6E7B88" FontSize="11">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding Text, ElementName=ChannelFilterBox}" Value="">
+                                            <Setter Property="Visibility" Value="Visible"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                    </Grid>
+                    <ListBox x:Name="ChannelList" Grid.Row="2"
                              ScrollViewer.VerticalScrollBarVisibility="Auto">
                         <ListBox.ItemTemplate>
                             <DataTemplate>
@@ -184,7 +203,7 @@
                                         <ColumnDefinition Width="*"/>
                                         <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
-                                    <CheckBox Content="{Binding Name}" IsChecked="{Binding IsEnabled}"
+                                    <CheckBox Content="{Binding PickerLabel}" IsChecked="{Binding IsEnabled}"
                                               Foreground="#E8EDF2" Padding="0"
                                               VerticalAlignment="Center"
                                               VerticalContentAlignment="Center"/>

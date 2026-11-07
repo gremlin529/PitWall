@@ -35,6 +35,7 @@
     <Compile Include="..\AimCsvAlignment.cs" Link="Shared\AimCsvAlignment.cs" />
     <Compile Include="..\TrackLineAlignment.cs" Link="Shared\TrackLineAlignment.cs" />
     <Compile Include="..\TrackProfileCache.cs" Link="Shared\TrackProfileCache.cs" />
+    <Compile Include="..\TrackElevation.cs" Link="Shared\TrackElevation.cs" />
     <Compile Include="..\PitWallPackage.cs" Link="Shared\PitWallPackage.cs" />
     <Compile Include="..\XrkWriter.cs" Link="Shared\XrkWriter.cs" />
   </ItemGroup>

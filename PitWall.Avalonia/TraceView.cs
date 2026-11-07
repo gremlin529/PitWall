@@ -67,10 +67,16 @@ internal sealed class TraceView : Grid
         chartColumn.Children.Add(_distanceScrollBar);
         SetColumn(chartColumn, 2);
         Children.Add(chartColumn);
+        // The wheel zooms over a chart, so over the map it scrolls the chart list instead.
+        _map.PointerWheelChanged += (_, e) =>
+        {
+            scroller.Offset = scroller.Offset.WithY(Math.Max(0, scroller.Offset.Y - e.Delta.Y * 60));
+            e.Handled = true;
+        };
         var hint = new TextBlock
         {
             Text = "Move over any chart to inspect the same distance on the GPS trace and other plots. " +
-                   "Scroll the wheel over a chart to zoom; drag a chart's bottom edge to resize it.",
+                   "Scroll the wheel over a chart to zoom, or over the map to scroll the charts; drag a chart's bottom edge to resize it.",
             FontSize = 10,
             Foreground = Palette.Muted,
             TextWrapping = TextWrapping.Wrap,

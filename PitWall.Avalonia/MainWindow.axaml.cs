@@ -62,6 +62,7 @@ public sealed partial class MainWindow : Window
         Closing += (_, _) =>
         {
             _closing = true;
+            _elevationCancellation?.Cancel();
             SaveWindowPlacement();
         };
         Trace.CursorChanged += OnCursorChanged;
@@ -269,6 +270,7 @@ public sealed partial class MainWindow : Window
                   $"{warnings.Count - result.Failures.Count} settings warnings. {warnings[^1]}";
             SaveLastDataFolder(folder);
             SelectFirstTrack();
+            StartElevationRefinement();
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {

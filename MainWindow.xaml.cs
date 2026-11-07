@@ -74,6 +74,8 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, TrackSegmentMap?> _segmentCache = new(StringComparer.OrdinalIgnoreCase);
     private int _loadGeneration;
     private int _overviewGeneration;
+    private IReadOnlyList<TrackPoint> _overviewOutline = [];
+    private CancellationTokenSource? _elevationCancellation;
     private int _treeGeneration;
     private int _activeLoads;
     private double _cursorDistanceM;
@@ -85,7 +87,57 @@ public partial class MainWindow : Window
         LoadSessionEdits();
         RebuildTelemetryCharts();
         RestoreWindowPlacement();
-        Closing += (_, _) => SaveWindowPlacement();
+        Closing += (_, _) =>
+        {
+            _elevationCancellation?.Cancel();
+            SaveWindowPlacement();
+        };
+    }
+
+    // After a folder loads, refine each track's elevation profile from its sessions in the background.
+    private void StartElevationRefinement()
+    {
+        _elevationCancellation?.Cancel();
+        var cancellation = _elevationCancellation = new CancellationTokenSource();
+        _ = TrackElevation.RunInBackground(_locations, location =>
+        {
+            Dispatcher.BeginInvoke(async () =>
+            {
+                if (cancellation.IsCancellationRequested || _selectedLocation?.Key != location.Key ||
+                    TrackOverviewPanel.Visibility != Visibility.Visible || _overviewOutline.Count == 0)
+                {
+                    return;
+                }
+
+                var outline = _overviewOutline;
+                var generation = _overviewGeneration;
+                var refined = await Task.Run(() => TrackElevation.Apply(location, outline));
+                if (generation == _overviewGeneration)
+                {
+                    TrackOverviewMap.MeanlinePoints = refined;
+                }
+            });
+        }, progress => Dispatcher.BeginInvoke(() => ShowElevationProgress(progress, cancellation)),
+            cancellation.Token);
+    }
+
+    private async void ShowElevationProgress(ElevationProgress progress, CancellationTokenSource cancellation)
+    {
+        if (cancellation.IsCancellationRequested)
+        {
+            return;
+        }
+
+        ElevationStatusText.Text = progress.Text;
+        ElevationStatusText.Visibility = Visibility.Visible;
+        if (progress.Finished)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(10));
+            if (_elevationCancellation == cancellation)
+            {
+                ElevationStatusText.Visibility = Visibility.Collapsed;
+            }
+        }
     }
 
     private sealed record WindowPlacement(double Left, double Top, double Width, double Height, bool Maximized);
@@ -247,13 +299,15 @@ public partial class MainWindow : Window
             .GroupBy(alias => alias.Key, StringComparer.OrdinalIgnoreCase)
             .Select(group => group.First())
             .ToArray();
+        var pickerChannels = BuildChartChannelSettings();
+        ChannelSources.Apply(pickerChannels, ChannelSources.Discover(_sessions));
         var dialog = new SettingsWindow(
             _viewerSettings,
             aliases,
             trackAliasItems,
             vehicleNames,
             _vehicleCatalog.Names,
-            BuildChartChannelSettings())
+            pickerChannels)
         {
             Owner = this
         };
@@ -679,6 +733,13 @@ public partial class MainWindow : Window
         _updatingChartScrollBar = false;
     }
 
+    // The wheel zooms over a chart, so over the map it scrolls the chart list instead.
+    private void TrackMapView_MouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        ChartScrollViewer.ScrollToVerticalOffset(ChartScrollViewer.VerticalOffset - e.Delta / 2.0);
+        e.Handled = true;
+    }
+
     private void ChartDistanceScrollBar_Scroll(object sender, ScrollEventArgs e)
     {
         if (_updatingChartScrollBar || !double.IsFinite(_chartViewEndM))
@@ -1036,6 +1097,7 @@ public partial class MainWindow : Window
         SaveLastDataFolder(folder);
         StatusText.Text = $"Loaded {_sessions.Count} sessions across {_locations.Count} tracks.";
         SelectFirstSession();
+        StartElevationRefinement();
         _ = LoadFastestLapHeadersAsync(treeGeneration);
         }
         finally
@@ -2831,8 +2893,17 @@ public partial class MainWindow : Window
                 return;
             }
 
+            // Use the refined elevation profile for this track once the background pass has built one.
+            var baseOutline = meanlinePoints;
+            var refinedOutline = await Task.Run(() => TrackElevation.Apply(location, baseOutline));
+            if (generation != _overviewGeneration)
+            {
+                return;
+            }
+
+            _overviewOutline = baseOutline;
             TrackOverviewMap.SegmentMap = segmentMap;
-            TrackOverviewMap.MeanlinePoints = meanlinePoints;
+            TrackOverviewMap.MeanlinePoints = refinedOutline;
             TrackOverviewMap.Traces = [];
 
             var progress = new Progress<int>(completed =>
