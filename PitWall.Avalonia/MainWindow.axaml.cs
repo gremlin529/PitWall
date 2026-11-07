@@ -332,30 +332,42 @@ public sealed partial class MainWindow : Window
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         var index = TelemetryLoader.BuildDataFileIndex(folder);
-        List<SessionInfo> sessions = [];
-        foreach (var file in files)
+        var results = new SessionInfo?[files.Length];
+        var errors = new string?[files.Length];
+        var completed = 0;
+        var reportLock = new object();
+        // AiM files each take a second or more to decode (a separate reader process), so read in parallel.
+        Parallel.For(0, files.Length, fileIndex =>
         {
-            report($"Reading {Path.GetFileName(file)}");
+            var file = files[fileIndex];
             try
             {
                 var extension = Path.GetExtension(file);
-                sessions.Add(TelemetryLoader.IsAimSessionFile(file)
+                results[fileIndex] = TelemetryLoader.IsAimSessionFile(file)
                     ? TelemetryLoader.ReadAiMSessionInfo(file)
                     : extension.Equals(".csv", StringComparison.OrdinalIgnoreCase)
                         ? TelemetryLoader.ReadAimCsvSessionInfo(file,
                             venue => SessionModel.GetCsvShiftSeconds(settings, venue))
                         : extension.Equals(".vbo", StringComparison.OrdinalIgnoreCase)
                             ? TelemetryLoader.ReadVboSessionInfo(file)
-                            : TelemetryLoader.ReadSessionInfo(file, index));
+                            : TelemetryLoader.ReadSessionInfo(file, index);
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
                                                InvalidDataException or ArgumentOutOfRangeException or
                                                JsonException or InvalidOperationException or
                                                System.ComponentModel.Win32Exception)
             {
-                failures.Add($"{Path.GetFileName(file)}: {exception.Message}");
+                errors[fileIndex] = $"{Path.GetFileName(file)}: {exception.Message}";
             }
-        }
+
+            var done = Interlocked.Increment(ref completed);
+            lock (reportLock)
+            {
+                report($"Reading session files… {done} of {files.Length}");
+            }
+        });
+        List<SessionInfo> sessions = [.. results.OfType<SessionInfo>()];
+        failures.AddRange(errors.OfType<string>());
 
         VehicleCatalog catalog;
         try

@@ -196,9 +196,14 @@ internal static partial class TelemetryLoader
 
         using var document = JsonDocument.Parse(output);
         var root = document.RootElement;
+
+        // The logger's crystal drifts (~50 ppm); the reader measures it against GPS satellite time, so every
+        // logger timestamp is rescaled to real elapsed time here. Older readers don't report it.
+        var gpsClockRate = GetNumber(root, "gpsClockRate");
+        var clockRate = gpsClockRate is > 0.999 and < 1.001 ? gpsClockRate : 1;
         var samples = root.GetProperty("samples").EnumerateArray()
             .Select(sample => new XrkSample(
-                GetNumber(sample, "timeMs"),
+                GetNumber(sample, "timeMs") * clockRate,
                 GetNumber(sample, "latitude"),
                 GetNumber(sample, "longitude"),
                 GetNumber(sample, "speedMps"),
@@ -223,15 +228,15 @@ internal static partial class TelemetryLoader
             trackName = "AiM track";
         }
 
-        var channels = ReadAiMChannels(root);
-        var laps = ReadAiMLaps(root, samples, channels);
+        var channels = ReadAiMChannels(root, clockRate);
+        var laps = ReadAiMLaps(root, samples, channels, clockRate);
         if (laps.Count == 0)
         {
             laps = [CreateAiMFallbackLap(samples, channels)];
         }
 
         var sessionId = ComputeAiMSessionId(filePath);
-        var localStart = ReadAiMStartTime(root, filePath);
+        var localStart = ReadAiMGpsStartTime(root, ReadAiMStartTime(root, filePath));
         var locationLatitude = samples.Average(sample => sample.Latitude);
         var locationLongitude = samples.Average(sample => sample.Longitude);
         var trackLengthM = laps.Max(lap => lap.Points[^1].DistanceM);
@@ -269,7 +274,8 @@ internal static partial class TelemetryLoader
     private static IReadOnlyList<AiMLapData> ReadAiMLaps(
         JsonElement root,
         IReadOnlyList<XrkSample> samples,
-        IReadOnlyList<XrkChannel> channels)
+        IReadOnlyList<XrkChannel> channels,
+        double clockRate)
     {
         if (!root.TryGetProperty("laps", out var lapsElement) ||
             lapsElement.ValueKind != JsonValueKind.Array)
@@ -280,8 +286,8 @@ internal static partial class TelemetryLoader
         var reportedLaps = lapsElement.EnumerateArray()
             .Select(lap => new XrkLap(
                 (int)GetNumber(lap, "number", -1),
-                GetNumber(lap, "startTimeMs"),
-                GetNumber(lap, "endTimeMs"),
+                GetNumber(lap, "startTimeMs") * clockRate,
+                GetNumber(lap, "endTimeMs") * clockRate,
                 GetString(lap, "type")))
             .Where(lap => double.IsFinite(lap.StartTimeMs) &&
                           double.IsFinite(lap.EndTimeMs) &&
@@ -331,7 +337,7 @@ internal static partial class TelemetryLoader
             1, startTimeMs, samples[^1].TimeMs - startTimeMs, points, lapChannels);
     }
 
-    private static IReadOnlyList<XrkChannel> ReadAiMChannels(JsonElement root)
+    private static IReadOnlyList<XrkChannel> ReadAiMChannels(JsonElement root, double clockRate)
     {
         if (!root.TryGetProperty("channels", out var channelsElement) ||
             channelsElement.ValueKind != JsonValueKind.Array)
@@ -349,7 +355,7 @@ internal static partial class TelemetryLoader
                         .Where(sample => sample.ValueKind == JsonValueKind.Array &&
                                          sample.GetArrayLength() == 2)
                         .Select(sample => new AiMChannelSample(
-                            sample[0].GetDouble(),
+                            sample[0].GetDouble() * clockRate,
                             sample[1].GetDouble()))
                         .Where(sample => double.IsFinite(sample.TimeMs) && double.IsFinite(sample.Value))
                         .OrderBy(sample => sample.TimeMs)
@@ -418,6 +424,24 @@ internal static partial class TelemetryLoader
     }
 
     private static double DegreesToRadians(double degrees) => degrees * Math.PI / 180;
+
+    // Local time at logger time 0 from GPS satellite time. The logger's own clock (logTime) is local wall time
+    // and only seconds-accurate, so it supplies just the time-zone offset (rounded to 15 minutes).
+    private static DateTime ReadAiMGpsStartTime(JsonElement root, DateTime loggerStart)
+    {
+        var utcAtZeroMs = GetNumber(root, "gpsUtcAtZeroMs");
+        if (!double.IsFinite(utcAtZeroMs) || utcAtZeroMs <= 0)
+        {
+            return loggerStart;
+        }
+
+        var utc = DateTime.UnixEpoch.AddMilliseconds(utcAtZeroMs);
+        var zoneMinutes = Math.Round((loggerStart - utc).TotalMinutes / 15) * 15;
+        var offset = Math.Abs(zoneMinutes) <= 14 * 60
+            ? TimeSpan.FromMinutes(zoneMinutes)
+            : TimeZoneInfo.Local.GetUtcOffset(utc);
+        return DateTime.SpecifyKind(utc + offset, DateTimeKind.Unspecified);
+    }
 
     private static DateTime ReadAiMStartTime(JsonElement root, string filePath)
     {

@@ -62,7 +62,8 @@ internal sealed record AiMChannelData(
     string Units,
     IReadOnlyList<AiMChannelSample> Samples);
 
-internal sealed record AiMChannelSample(double TimeMs, double Value);
+// A struct: sessions hold millions of these, and per-sample heap objects made loading and lap cutting slow.
+internal readonly record struct AiMChannelSample(double TimeMs, double Value);
 
 internal sealed class ChartChannelSetting(string key, string name, string units, bool isEnabled)
 {

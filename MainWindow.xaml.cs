@@ -801,32 +801,39 @@ public partial class MainWindow : Window
         }
 
         var dataFileIndex = TelemetryLoader.BuildDataFileIndex(folder);
-        List<SessionInfo> loaded = [];
-        List<string> failures = [];
+        var results = new SessionInfo?[files.Length];
+        var errors = new string?[files.Length];
+        var completed = 0;
         await Task.Run(() =>
         {
-            foreach (var file in files)
+            // AiM files each take a second or more to decode (a separate reader process), so read in parallel.
+            Parallel.For(0, files.Length, index =>
             {
-                Dispatcher.Invoke(() => UpdateLoadingDetail($"Reading {Path.GetFileName(file)}"));
+                var file = files[index];
                 try
                 {
                     var extension = Path.GetExtension(file);
-                    loaded.Add(TelemetryLoader.IsAimSessionFile(file)
+                    results[index] = TelemetryLoader.IsAimSessionFile(file)
                         ? TelemetryLoader.ReadAiMSessionInfo(file)
                         : extension.Equals(".csv", StringComparison.OrdinalIgnoreCase)
                             ? TelemetryLoader.ReadAimCsvSessionInfo(file, GetCsvShiftSeconds)
                             : extension.Equals(".vbo", StringComparison.OrdinalIgnoreCase)
                                 ? TelemetryLoader.ReadVboSessionInfo(file)
-                                : TelemetryLoader.ReadSessionInfo(file, dataFileIndex));
+                                : TelemetryLoader.ReadSessionInfo(file, dataFileIndex);
                 }
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
                                                    InvalidDataException or ArgumentOutOfRangeException or
                                                    JsonException or Win32Exception or InvalidOperationException)
                 {
-                    failures.Add($"{Path.GetFileName(file)}: {exception.Message}");
+                    errors[index] = $"{Path.GetFileName(file)}: {exception.Message}";
                 }
-            }
+
+                var done = Interlocked.Increment(ref completed);
+                Dispatcher.BeginInvoke(() => UpdateLoadingDetail($"Reading session files… {done} of {files.Length}"));
+            });
         });
+        var loaded = results.OfType<SessionInfo>().ToList();
+        var failures = errors.OfType<string>().ToList();
 
         _sessions.Clear();
         _csvOriginals.Clear();
@@ -848,7 +855,7 @@ public partial class MainWindow : Window
             MessageBox.Show(this, exception.Message, "Vehicle catalog could not be loaded",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
         }
-        UpdateLoadingDetail("Matching AiM and Garmin lap start/finish crossings…");
+        UpdateLoadingDetail("Aligning logger laps to the Garmin track lines…");
         var aimCorrections = await Task.Run(() => AimGpsSessionAlignment.CorrectSessions(_sessions));
         _sessions.Clear();
         _sessions.AddRange(aimCorrections);

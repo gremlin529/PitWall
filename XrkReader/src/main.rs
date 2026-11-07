@@ -90,7 +90,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         })
         .collect();
 
-    let result = json!({
+    let mut result = json!({
         "driver": file.metadata.driver,
         "vehicle": file.metadata.vehicle,
         "venue": file.metadata.venue,
@@ -101,8 +101,72 @@ fn main() -> Result<(), Box<dyn Error>> {
         "channels": channels,
         "samples": samples
     });
+    if let Some((utc_at_zero_ms, rate)) = gps_clock(&file.raw.gps_data, &gps.timecodes) {
+        result["gpsUtcAtZeroMs"] = json!(utc_at_zero_ms);
+        result["gpsClockRate"] = json!(rate);
+    }
 
     serde_json::to_writer(io::stdout().lock(), &result)?;
     println!();
     Ok(())
+}
+
+/// Relates the logger clock to satellite time. Each 56-byte GPS record holds the logger timecode followed by a
+/// u-blox NAV-SOL solution whose GPS week and time of week give UTC. Returns the UTC (Unix ms) at logger time 0
+/// and the ratio of real elapsed time to logger elapsed time, from a least-squares fit with outliers removed.
+fn gps_clock(raw: &[u8], timecodes: &[i64]) -> Option<(f64, f64)> {
+    const GPS_EPOCH_UNIX_MS: f64 = 315_964_800_000.0; // 1980-01-06T00:00:00Z
+    const GPS_MINUS_UTC_MS: f64 = 18_000.0; // leap seconds since the GPS epoch (unchanged since 2017)
+    const WEEK_AND_TOW_VALID: u8 = 0x0C; // NAV-SOL flags: WKNSET | TOWSET
+
+    let records = raw.len() / 56;
+    if records != timecodes.len() {
+        return None;
+    }
+
+    let mut pairs = Vec::with_capacity(records);
+    for index in 0..records {
+        let record = &raw[index * 56..index * 56 + 56];
+        let itow = u32::from_le_bytes(record[4..8].try_into().ok()?) as f64;
+        let ftow = i32::from_le_bytes(record[8..12].try_into().ok()?) as f64;
+        let week = u16::from_le_bytes(record[12..14].try_into().ok()?) as f64;
+        let fix = record[14];
+        let flags = record[15];
+        if fix >= 3 && week > 0.0 && flags & WEEK_AND_TOW_VALID == WEEK_AND_TOW_VALID {
+            let utc = GPS_EPOCH_UNIX_MS + week * 604_800_000.0 + itow + ftow / 1e6 - GPS_MINUS_UTC_MS;
+            pairs.push((timecodes[index] as f64, utc));
+        }
+    }
+
+    let mut fit = fit_line(&pairs)?;
+    for _ in 0..2 {
+        pairs.retain(|(time, utc)| (utc - (fit.0 + fit.1 * time)).abs() <= 100.0);
+        fit = fit_line(&pairs)?;
+    }
+
+    (pairs.len() >= 100 && (fit.1 - 1.0).abs() < 0.001).then_some(fit)
+}
+
+fn fit_line(pairs: &[(f64, f64)]) -> Option<(f64, f64)> {
+    if pairs.len() < 2 {
+        return None;
+    }
+
+    // Centre both axes so the large Unix-ms values don't swamp the slope in floating point.
+    let count = pairs.len() as f64;
+    let mean_time = pairs.iter().map(|pair| pair.0).sum::<f64>() / count;
+    let mean_utc = pairs.iter().map(|pair| pair.1 - pairs[0].1).sum::<f64>() / count + pairs[0].1;
+    let mut covariance = 0.0;
+    let mut variance = 0.0;
+    for (time, utc) in pairs {
+        covariance += (time - mean_time) * (utc - mean_utc);
+        variance += (time - mean_time) * (time - mean_time);
+    }
+
+    if variance <= 0.0 {
+        return None;
+    }
+
+    let rate = covariance / variance;
+    Some((mean_utc - rate * mean_time, rate))
 }

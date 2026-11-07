@@ -218,7 +218,9 @@ internal sealed class TrackReference
                 continue;
             }
 
-            var projection = Project(points[index].Latitude, points[index].Longitude, stride <= 4 ? hint : -1);
+            // Even with the stride, consecutive racing-speed samples are well inside Project's local search window
+            // (and it falls back to a full search if they aren't).
+            var projection = Project(points[index].Latitude, points[index].Longitude, hint);
             hint = projection.Segment;
             offsets.Add(projection.OffsetM);
         }
@@ -249,7 +251,8 @@ internal sealed class TrackReference
 /// <summary>
 /// Puts GPS logger sessions (AiM XRK/XRZ, VBOX) on the Garmin track definition: laps are re-cut where the logger's
 /// GPS crosses the Garmin start/finish line and lap distance is the projection onto the Garmin meanline, exactly as
-/// Garmin computes its own laps. Same-day AiM sessions are then clock-corrected against matching Garmin laps.
+/// Garmin computes its own laps. (AiM clock time and drift come from GPS satellite time in the XRK reader, not from
+/// Garmin: Garmin session start times are not reliable enough to correct another device's clock against.)
 /// </summary>
 internal static class AimGpsSessionAlignment
 {
@@ -257,9 +260,6 @@ internal static class AimGpsSessionAlignment
 
     // 90th-percentile distance from the centreline above which a meanline is not the layout that was driven.
     private const double MaxFitErrorM = 15;
-
-    private sealed record LapTiming(double StartMs, double DurationMs);
-    private sealed record ClockFit(double OffsetSeconds, double Rate, double MedianResidual, double MedianLapError, int Pairs);
 
     public static IReadOnlyList<SessionInfo> CorrectSessions(IReadOnlyList<SessionInfo> input)
     {
@@ -294,11 +294,6 @@ internal static class AimGpsSessionAlignment
                         MeanlineLengthM = reference.LengthM,
                         AiMData = session.AiMData with { Laps = laps }
                     };
-                }
-
-                if (TelemetryLoader.IsAimSessionFile(session.FilePath))
-                {
-                    session = CorrectClock(session, garminSessions);
                 }
             }
             catch (Exception exception) when (exception is IOException or InvalidDataException or JsonException)
@@ -464,205 +459,42 @@ internal static class AimGpsSessionAlignment
 
     private static AiMChannelSample[] Slice(IReadOnlyList<AiMChannelSample> samples, double start, double end)
     {
-        var low = 0;
-        var high = samples.Count;
-        while (low < high)
+        var first = LowerBound(samples, start);
+        var count = UpperBound(samples, end) - first;
+        var result = new AiMChannelSample[Math.Max(0, count)];
+        for (var index = 0; index < result.Length; index++)
         {
-            var middle = (low + high) / 2;
-            if (samples[middle].TimeMs < start)
-            {
-                low = middle + 1;
-            }
-            else
-            {
-                high = middle;
-            }
-        }
-
-        var result = new List<AiMChannelSample>();
-        for (var index = low; index < samples.Count && samples[index].TimeMs <= end; index++)
-        {
-            result.Add(samples[index] with { TimeMs = samples[index].TimeMs - start });
-        }
-
-        return result.ToArray();
-    }
-
-    // With laps now cut on the same line as Garmin's, matching lap durations pins the logger clock's offset and rate
-    // against a Garmin session recorded alongside it (same car, same time).
-    private static SessionInfo CorrectClock(SessionInfo aim, IReadOnlyList<SessionInfo> garminSessions)
-    {
-        var aimLaps = aim.AiMData!.Laps.Select(lap => new LapTiming(lap.StartTimeMs, lap.DurationMs)).ToArray();
-        ClockFit? best = null;
-        foreach (var reference in garminSessions.Where(candidate =>
-                     candidate.LocalStart.Date == aim.LocalStart.Date &&
-                     Math.Abs((candidate.LocalStart - aim.LocalStart).TotalMinutes) <= 20 &&
-                     DistanceMeters(aim.Latitude, aim.Longitude, candidate.Latitude, candidate.Longitude) <= SameVenueM))
-        {
-            var candidate = FitClock(aimLaps, ReadGarminLapTimings(reference.FilePath),
-                (reference.LocalStart - aim.LocalStart).TotalSeconds);
-            if (candidate is null || candidate.Pairs < 4 || candidate.MedianLapError > 0.2 ||
-                candidate.MedianResidual > 0.1 || Math.Abs(candidate.Rate - 1) > 0.00025)
-            {
-                continue;
-            }
-
-            if (best is null || candidate.Pairs > best.Pairs ||
-                (candidate.Pairs == best.Pairs && candidate.MedianLapError < best.MedianLapError))
-            {
-                best = candidate;
-            }
-        }
-
-        if (best is null)
-        {
-            return aim;
-        }
-
-        var scale = best.Rate;
-        return aim with
-        {
-            LocalStart = aim.LocalStart.AddSeconds(best.OffsetSeconds),
-            SessionDurationSeconds = aim.SessionDurationSeconds * scale,
-            AiMData = aim.AiMData with
-            {
-                Laps = aim.AiMData.Laps.Select(lap => lap with
-                {
-                    StartTimeMs = lap.StartTimeMs * scale,
-                    DurationMs = lap.DurationMs * scale,
-                    Points = lap.Points.Select(point => point with { TimeMs = point.TimeMs * scale }).ToArray(),
-                    Channels = lap.Channels.Select(channel => channel with
-                    {
-                        Samples = channel.Samples.Select(sample => sample with { TimeMs = sample.TimeMs * scale }).ToArray()
-                    }).ToArray()
-                }).ToArray()
-            }
-        };
-    }
-
-    private static ClockFit? FitClock(IReadOnlyList<LapTiming> aimLaps, IReadOnlyList<LapTiming> garminLaps,
-        double startDifferenceSeconds)
-    {
-        var n = aimLaps.Count;
-        var m = garminLaps.Count;
-        if (n == 0 || m == 0)
-        {
-            return null;
-        }
-
-        // Longest in-order pairing of laps whose durations agree, preferring the smallest total disagreement.
-        var counts = new int[n + 1, m + 1];
-        var errors = new double[n + 1, m + 1];
-        var steps = new byte[n + 1, m + 1];
-        for (var i = n - 1; i >= 0; i--)
-        {
-            for (var j = m - 1; j >= 0; j--)
-            {
-                (counts[i, j], errors[i, j], steps[i, j]) = (counts[i + 1, j], errors[i + 1, j], 1);
-                if (Better(counts[i, j + 1], errors[i, j + 1], counts[i, j], errors[i, j]))
-                {
-                    (counts[i, j], errors[i, j], steps[i, j]) = (counts[i, j + 1], errors[i, j + 1], 2);
-                }
-
-                var lapError = Math.Abs(aimLaps[i].DurationMs - garminLaps[j].DurationMs);
-                if (lapError <= 200 && Better(counts[i + 1, j + 1] + 1, errors[i + 1, j + 1] + lapError,
-                        counts[i, j], errors[i, j]))
-                {
-                    (counts[i, j], errors[i, j], steps[i, j]) = (counts[i + 1, j + 1] + 1, errors[i + 1, j + 1] + lapError, 3);
-                }
-            }
-        }
-
-        var pairs = new List<(LapTiming Aim, LapTiming Garmin)>();
-        for (int ai = 0, gi = 0; ai < n && gi < m;)
-        {
-            switch (steps[ai, gi])
-            {
-                case 1: ai++; break;
-                case 2: gi++; break;
-                default: pairs.Add((aimLaps[ai++], garminLaps[gi++])); break;
-            }
-        }
-
-        if (pairs.Count < 4)
-        {
-            return null;
-        }
-
-        var x = pairs.Select(pair => pair.Aim.StartMs / 1000d).ToArray();
-        var y = pairs.Select(pair => startDifferenceSeconds + (pair.Garmin.StartMs - pair.Aim.StartMs) / 1000d).ToArray();
-        var meanX = x.Average();
-        var meanY = y.Average();
-        var denominator = x.Sum(value => (value - meanX) * (value - meanX));
-        var slope = pairs.Count >= 5 && denominator > 0
-            ? x.Zip(y).Sum(pair => (pair.First - meanX) * (pair.Second - meanY)) / denominator
-            : 0;
-        var offset = meanY - slope * meanX;
-        var residuals = x.Zip(y).Select(pair => Math.Abs(pair.Second - offset - slope * pair.First)).Order().ToArray();
-        var lapErrors = pairs.Select(pair => Math.Abs(pair.Aim.DurationMs - pair.Garmin.DurationMs)).Order().ToArray();
-        return new ClockFit(offset, 1 + slope, residuals[residuals.Length / 2],
-            lapErrors[lapErrors.Length / 2] / 1000d, pairs.Count);
-
-        static bool Better(int candidateCount, double candidateError, int currentCount, double currentError) =>
-            candidateCount > currentCount || (candidateCount == currentCount && candidateError < currentError);
-    }
-
-    // Driven-lap start times and durations, found by scanning the bytes rather than parsing tens of MB of samples.
-    private static IReadOnlyList<LapTiming> ReadGarminLapTimings(string filePath)
-    {
-        var bytes = File.ReadAllBytes(filePath).AsSpan();
-        var lapsStart = bytes.IndexOf("\"drivenLaps\""u8);
-        if (lapsStart < 0)
-        {
-            return [];
-        }
-
-        var result = new List<LapTiming>();
-        var content = bytes[lapsStart..];
-        while (true)
-        {
-            var duration = ReadNumberAfter(ref content, "\"durationMs\""u8);
-            if (duration is null)
-            {
-                break;
-            }
-
-            var start = ReadNumberAfter(ref content, "\"startTimeSessionMs\""u8);
-            if (start is null)
-            {
-                break;
-            }
-
-            if (duration > 0)
-            {
-                result.Add(new LapTiming(start.Value, duration.Value));
-            }
+            var sample = samples[first + index];
+            result[index] = new AiMChannelSample(sample.TimeMs - start, sample.Value);
         }
 
         return result;
 
-        static double? ReadNumberAfter(ref Span<byte> content, ReadOnlySpan<byte> key)
+        // First index with TimeMs >= time / first index with TimeMs > time.
+        static int LowerBound(IReadOnlyList<AiMChannelSample> samples, double time) =>
+            Search(samples, value => value < time);
+
+        static int UpperBound(IReadOnlyList<AiMChannelSample> samples, double time) =>
+            Search(samples, value => value <= time);
+
+        static int Search(IReadOnlyList<AiMChannelSample> samples, Func<double, bool> before)
         {
-            var at = content.IndexOf(key);
-            if (at < 0)
+            var low = 0;
+            var high = samples.Count;
+            while (low < high)
             {
-                return null;
+                var middle = (low + high) / 2;
+                if (before(samples[middle].TimeMs))
+                {
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle;
+                }
             }
 
-            content = content[(at + key.Length)..];
-            var begin = 0;
-            while (begin < content.Length && content[begin] is (byte)':' or (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n')
-            {
-                begin++;
-            }
-
-            var end = begin;
-            while (end < content.Length && content[end] is (byte)'-' or (byte)'.' or (byte)'e' or (byte)'E' or (byte)'+' or >= (byte)'0' and <= (byte)'9')
-            {
-                end++;
-            }
-
-            return System.Buffers.Text.Utf8Parser.TryParse(content[begin..end], out double value, out _) ? value : double.NaN;
+            return low;
         }
     }
 
