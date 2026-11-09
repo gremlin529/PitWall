@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "PitWall (Avalonia)",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build-avalonia",
+      "program": "${workspaceFolder}/PitWall.Avalonia/bin/Debug/net10.0/PitWall.dll",
+      "cwd": "${workspaceFolder}/PitWall.Avalonia",
+      "console": "internalConsole",
+      "stopAtEntry": false
+    }
+  ]
+}

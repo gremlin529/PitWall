@@ -322,8 +322,7 @@ public sealed partial class MainWindow
                         batch.Add((session, value));
                     }
                 }
-                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
-                                                   JsonException or InvalidDataException or ArgumentException)
+                catch (Exception exception) when (exception is not OutOfMemoryException)
                 {
                     failures.Add($"{session.FileName}: {exception.Message}");
                 }
@@ -357,7 +356,6 @@ public sealed partial class MainWindow
             return;
         }
 
-        var drivers = new HashSet<TreeNode>();
         foreach (var (session, duration) in items)
         {
             // A lap list that has already been read is authoritative.
@@ -365,7 +363,12 @@ public sealed partial class MainWindow
             {
                 _fastestLapMs[session.FilePath] = duration;
             }
+        }
 
+        // Refresh headers only after the whole batch is stored, or later sessions of a driver would be missed.
+        var drivers = new HashSet<TreeNode>();
+        foreach (var (session, _) in items)
+        {
             if (_driverNodes.TryGetValue(session.FilePath, out var driverNode) && drivers.Add(driverNode))
             {
                 UpdateDriverHeaders(session);

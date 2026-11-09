@@ -814,6 +814,16 @@ public sealed partial class MainWindow : Window
     // Clicking a session's fastest-lap time in its header selects that lap (WPF SessionFastestLap_MouseLeftButtonDown).
     private async void OnTreePointerPressed(object? sender, PointerPressedEventArgs e)
     {
+        // macOS delivers Control+click as a left press without raising ContextRequested.
+        if (e.Source is Visual clicked &&
+            e.GetCurrentPoint(clicked).Properties.IsLeftButtonPressed &&
+            e.KeyModifiers.HasFlag(KeyModifiers.Control) &&
+            ShowTreeContextMenu(clicked))
+        {
+            e.Handled = true;
+            return;
+        }
+
         if (e.Source is not TextBlock { DataContext: TreeNode { SuffixIsLink: true, Session: not null } node } text ||
             !text.Classes.Contains("suffix") ||
             !e.GetCurrentPoint(text).Properties.IsLeftButtonPressed)

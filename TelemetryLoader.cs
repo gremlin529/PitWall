@@ -748,6 +748,7 @@ internal static partial class TelemetryLoader
         var carry = 0;
         var foundDrivenLaps = false;
         double? fastestDurationMs = null;
+        var rescanCarry = false;
 
         while (true)
         {
@@ -759,7 +760,9 @@ internal static partial class TelemetryLoader
 
             var available = carry + read;
             var content = buffer.AsSpan(0, available);
-            var scanStart = Math.Max(0, carry - durationMarker.Length + 1);
+            var scanStart = rescanCarry ? 0 : Math.Max(0, carry - durationMarker.Length + 1);
+            rescanCarry = false;
+            var keep = Math.Min(available, 63);
             if (!foundDrivenLaps)
             {
                 var markerIndex = content.IndexOf(marker);
@@ -797,6 +800,13 @@ internal static partial class TelemetryLoader
 
                     if (valueEnd == available)
                     {
+                        // The value is cut off by the buffer end; carry the whole marker over so it is re-read.
+                        if (available - durationIndex <= 4096)
+                        {
+                            keep = available - durationIndex;
+                            rescanCarry = true;
+                        }
+
                         break;
                     }
 
@@ -812,7 +822,7 @@ internal static partial class TelemetryLoader
                 }
             }
 
-            carry = Math.Min(available, 63);
+            carry = keep;
             content[^carry..].CopyTo(buffer);
         }
 

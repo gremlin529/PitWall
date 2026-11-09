@@ -40,6 +40,7 @@ The viewer automatically looks for a `Data` folder beside the application or pro
 - Correct a session's vehicle, track condition, or session type in the session details panel. Corrections are saved in `%LOCALAPPDATA%\TrackTelemetryViewer\session-overrides.json`; original Garmin exports are not changed.
 - Vehicle and driver names are resolved from the exported catalogs and profile files when their IDs match. The `3F9DDA44…` vehicle alias is identified as a 2023 Porsche GT4, but the vehicle export cannot distinguish its tire/model variant; the vehicle editor offers catalog cars plus custom names when an alias cannot be mapped.
 - Right-click a vehicle node to assign a catalog car name. Garmin assignments are saved by metadata alias; XRK assignments are saved by session ID because XRK files do not provide a Garmin vehicle alias. Both are saved in `viewer-settings.json` in the selected data folder and reused the next time it is loaded.
+- Right-click a track node to reassign its track aliases to an existing track name, a custom name, or the detected names.
 - The track tree nodes have visible expand/collapse controls.
 - The track overview counts laps in the background by scanning session telemetry files.
 - Track overviews show a separate car-and-driver summary with each driver's session and lap counts plus clickable fastest and optimal laps. Each driver node shows that driver's optimal lap time and opens the optimal lap when selected.

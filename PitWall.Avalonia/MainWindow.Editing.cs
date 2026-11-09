@@ -12,16 +12,23 @@ public sealed partial class MainWindow
 {
     private void OnTreeContextRequested(object? sender, ContextRequestedEventArgs e)
     {
-        if (e.Source is not Visual source ||
-            (source as TreeViewItem ?? source.FindAncestorOfType<TreeViewItem>()) is not { } item ||
+        if (e.Source is Visual source && ShowTreeContextMenu(source))
+        {
+            e.Handled = true;
+        }
+    }
+
+    private bool ShowTreeContextMenu(Visual source)
+    {
+        if ((source as TreeViewItem ?? source.FindAncestorOfType<TreeViewItem>()) is not { } item ||
             item.DataContext is not TreeNode node ||
             CreateContextMenu(node) is not { } menu)
         {
-            return;
+            return false;
         }
 
         menu.Open(item);
-        e.Handled = true;
+        return true;
     }
 
     private ContextMenu? CreateContextMenu(TreeNode node)
@@ -68,6 +75,8 @@ public sealed partial class MainWindow
         }
         else if (node.Location is { } location)
         {
+            AddTrackAliasItems(items, location);
+
             if (_model.GetAssignableLayouts(location) is { Count: > 0 } layouts)
             {
                 var parent = new MenuItem { Header = "Choose layout" };
@@ -94,6 +103,93 @@ public sealed partial class MainWindow
         }
 
         return menu;
+    }
+
+    private void AddTrackAliasItems(List<Control> items, TrackLocation location)
+    {
+        var aliasSettings = _model.BuildTrackAliasSettings()
+            .ToDictionary(alias => alias.Key, StringComparer.OrdinalIgnoreCase);
+        var aliasKeys = location.Sessions
+            .Where(session => !SessionModel.IsCsvSession(session))
+            .Select(session => SessionModel.CreateTrackAliasKey(
+                string.IsNullOrWhiteSpace(session.MeanlineTrackName)
+                    ? "Unknown track"
+                    : session.MeanlineTrackName.Trim(),
+                _model.GetEffectiveLayoutName(session)))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Where(aliasSettings.ContainsKey)
+            .ToArray();
+        if (aliasKeys.Length == 0)
+        {
+            return;
+        }
+
+        var choices = aliasSettings.Values
+            .SelectMany(alias => new[] { alias.Name, alias.DefaultName })
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.CurrentCultureIgnoreCase)
+            .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase)
+            .ToArray();
+        var parent = new MenuItem { Header = "Assign track alias" };
+        foreach (var name in choices)
+        {
+            parent.Items.Add(Item(name, async () => await AssignTrackAlias(location, aliasKeys, name)));
+        }
+
+        parent.Items.Add(new Separator());
+        parent.Items.Add(Item("Other name…", async () =>
+        {
+            var name = await Dialogs.PromptAsync(this, "Assign track alias", "Track name", location.DisplayName);
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                await AssignTrackAlias(location, aliasKeys, name);
+            }
+        }));
+
+        if (aliasKeys.Any(key => _model.Settings.TrackMappings.ContainsKey(key)))
+        {
+            parent.Items.Add(new Separator());
+            parent.Items.Add(Item("Use detected track names", async () =>
+                await AssignTrackAlias(location, aliasKeys, null)));
+        }
+
+        items.Add(parent);
+    }
+
+    private async Task AssignTrackAlias(
+        TrackLocation location, IReadOnlyList<string> aliasKeys, string? name)
+    {
+        var updated = SettingsStore.Clone(_model.Settings);
+        foreach (var key in aliasKeys)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                updated.TrackMappings.Remove(key);
+            }
+            else
+            {
+                updated.TrackMappings[key] = name.Trim();
+            }
+        }
+
+        if (!SaveSettings(updated, "Could not save track alias"))
+        {
+            return;
+        }
+
+        var firstSessionPath = location.Sessions[0].FilePath;
+        _model.BuildTrackLocations();
+        await RebuildTreeAsync(true);
+        if (SessionTree.SelectedItem is null)
+        {
+            SelectNode(node => node.Location is { } candidate &&
+                              candidate.Sessions.Any(session =>
+                                  session.FilePath.Equals(firstSessionPath, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        StatusText.Text = string.IsNullOrWhiteSpace(name)
+            ? "The track now uses its detected names."
+            : $"Assigned track alias “{name.Trim()}”.";
     }
 
     private void AddLapItems(List<Control> items, LapInfo lap)

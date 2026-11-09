@@ -1,0 +1,13 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build-avalonia",
+      "type": "process",
+      "command": "dotnet",
+      "args": ["build", "${workspaceFolder}/PitWall.Avalonia/PitWall.Avalonia.csproj"],
+      "problemMatcher": "$msCompile",
+      "group": { "kind": "build", "isDefault": true }
+    }
+  ]
+}
