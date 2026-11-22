@@ -31,8 +31,8 @@ internal static partial class TelemetryLoader
     };
 
     // RaceBox writes .vbo files with its own column names; map them onto the Racelogic names so sessions from
-    // either logger share channels and compare directly. Sign conventions already match (accx + when accelerating,
-    // accy − in a right-hand turn).
+    // either logger share channels and compare directly. Both loggers use the same signs (accx + when accelerating,
+    // accy − in a right-hand turn); lateral is flipped on load to match Garmin (+ in a right-hand turn).
     private static readonly Dictionary<string, string> RaceBoxColumnNames = new(StringComparer.OrdinalIgnoreCase)
     {
         ["lng"] = "long",
@@ -109,6 +109,16 @@ internal static partial class TelemetryLoader
         if (rows.Count < 20)
         {
             throw new InvalidDataException($"{Path.GetFileName(filePath)} has too few GPS samples.");
+        }
+
+        // VBOX/RaceBox lateral acceleration is negative in a right-hand turn; Garmin's is positive. Flip it so
+        // lateral G traces from every logger point the same way.
+        if (lateralColumn >= 0)
+        {
+            foreach (var row in rows)
+            {
+                row[lateralColumn] = -row[lateralColumn];
+            }
         }
 
         // hhmmss.sss to seconds, continuing across midnight.

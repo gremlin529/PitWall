@@ -197,7 +197,9 @@ internal sealed class SettingsWindow : Window
         IEnumerable<TrackAliasSetting> trackAliases,
         IEnumerable<string> vehicleNames,
         IEnumerable<string> catalogNames,
-        IEnumerable<ChartChannelSetting> channels)
+        IEnumerable<ChartChannelSetting> channels,
+        IEnumerable<DriverAliasSetting> driverAliases,
+        IEnumerable<string> driverNames)
     {
         Title = "Settings";
         _channels = channels.ToList();
@@ -280,6 +282,58 @@ internal sealed class SettingsWindow : Window
             }, box));
         }
 
+        var drivers = driverAliases.ToList();
+        var driverChoices = driverNames
+            .Concat(drivers.Select(driver => driver.DetectedName))
+            .Concat(drivers.Select(driver => driver.Name))
+            .Where(name => !string.IsNullOrWhiteSpace(name) &&
+                           !name.Equals(DriverSources.UnknownDriver, StringComparison.OrdinalIgnoreCase))
+            .Select(name => name.Trim())
+            .Distinct(StringComparer.CurrentCultureIgnoreCase)
+            .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase)
+            .ToList();
+        var driverPanel = new StackPanel { Spacing = 4 };
+        driverPanel.Children.Add(new TextBlock
+        {
+            Text = "Rename the driver for each source in the data; use the same name to combine drivers. " +
+                   "Files with no driver are grouped by folder. Leave blank to keep the name from the data.",
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap,
+            Margin = new Thickness(0, 0, 0, 8)
+        });
+        foreach (var driver in drivers)
+        {
+            var box = new AutoCompleteBox
+            {
+                ItemsSource = driverChoices,
+                MinimumPrefixLength = 0,
+                FilterMode = AutoCompleteFilterMode.Contains,
+                Text = driver.Name,
+                Watermark = driver.DetectedName,
+                Width = 220,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var label = new StackPanel
+            {
+                Width = 340,
+                Children =
+                {
+                    new TextBlock { Text = driver.DetectedName, FontSize = 12 },
+                    new TextBlock
+                    {
+                        Text = driver.SessionCount == 1
+                            ? $"{driver.Source} · 1 session"
+                            : $"{driver.Source} · {driver.SessionCount} sessions",
+                        FontSize = 10,
+                        Opacity = 0.7,
+                        TextTrimming = Avalonia.Media.TextTrimming.CharacterEllipsis
+                    }
+                }
+            };
+            ToolTip.SetTip(label, driver.SourceDetail);
+            driverPanel.Children.Add(Row(label, box));
+            _driverBoxes.Add((driver, box));
+        }
+
         var save = new Button { Content = "Save", IsDefault = true };
         var cancel = new Button { Content = "Cancel", IsCancel = true };
         save.Click += (_, _) => Close(BuildResult());
@@ -346,6 +400,11 @@ internal sealed class SettingsWindow : Window
                 },
                 new TabItem
                 {
+                    Header = "Drivers",
+                    Content = new ScrollViewer { Margin = new Thickness(12), Content = driverPanel }
+                },
+                new TabItem
+                {
                     Header = "Track names",
                     Content = new ScrollViewer { Margin = new Thickness(12), Content = trackPanel }
                 }
@@ -364,6 +423,7 @@ internal sealed class SettingsWindow : Window
     }
 
     private readonly List<(string Alias, AutoCompleteBox Box)> _autoBoxes = [];
+    private readonly List<(DriverAliasSetting Setting, AutoCompleteBox Box)> _driverBoxes = [];
     private readonly List<ChartChannelSetting> _channels;
     private readonly StackPanel _channelList = new() { Spacing = 2 };
 
@@ -511,6 +571,19 @@ internal sealed class SettingsWindow : Window
             else
             {
                 result.TrackMappings[setting.Key] = name;
+            }
+        }
+
+        foreach (var (setting, box) in _driverBoxes)
+        {
+            var name = box.Text?.Trim() ?? string.Empty;
+            if (name.Length == 0 || name.Equals(setting.DetectedName, StringComparison.Ordinal))
+            {
+                result.DriverMappings.Remove(setting.Key);
+            }
+            else
+            {
+                result.DriverMappings[setting.Key] = name;
             }
         }
 

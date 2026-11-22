@@ -169,6 +169,9 @@ internal sealed class ViewerSettings
         new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, string> TrackMappings { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
+    // Driver names by DriverSources key (Garmin profile, logger driver field, or folder of a file with no driver).
+    public Dictionary<string, string> DriverMappings { get; set; } =
+        new(StringComparer.OrdinalIgnoreCase);
     // Chart heights (device-independent pixels) by chart channel key, set by dragging a chart's bottom edge.
     public Dictionary<string, double> ChartHeights { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
@@ -178,6 +181,87 @@ internal sealed class VehicleAliasSetting(string alias, string vehicleName)
 {
     public string Alias { get; } = alias;
     public string VehicleName { get; set; } = vehicleName;
+}
+
+internal sealed class DriverAliasSetting(string key, string detectedName, string source, string sourceDetail, int sessionCount, string name)
+{
+    public string Key { get; } = key;
+    public string DetectedName { get; } = detectedName;
+    public string Source { get; } = source;
+    public string SourceDetail { get; } = sourceDetail;
+    public int SessionCount { get; } = sessionCount;
+    public string Name { get; set; } = name;
+}
+
+/// <summary>
+/// Works out where a session's driver name comes from so it can be renamed in settings. Garmin sessions are keyed by
+/// driver profile, logger files by the driver name they carry, and files with no driver by their folder, so a folder
+/// per driver (e.g. "PitWall Data\Mat") can be assigned in one go without touching other unnamed files.
+/// </summary>
+internal static class DriverSources
+{
+    public const string UnknownDriver = "Unknown driver";
+
+    public static (string Key, string DetectedName, string Source, string SourceDetail) Identify(
+        SessionInfo session, IReadOnlyDictionary<string, string> profileNames)
+    {
+        if (!string.IsNullOrWhiteSpace(session.GarminGuid))
+        {
+            return profileNames.TryGetValue(session.GarminGuid, out var profileName) &&
+                   !string.IsNullOrWhiteSpace(profileName)
+                ? ($"garmin:{session.GarminGuid}", profileName, "Garmin driver profile", session.GarminGuid)
+                : ($"garmin:{session.GarminGuid}", UnknownDriver, "Garmin profile with no name", session.GarminGuid);
+        }
+
+        if (!string.IsNullOrWhiteSpace(session.AiMData?.DriverName))
+        {
+            var name = session.AiMData.DriverName.Trim();
+            return ($"logger:{name}", name, "Driver named in logger file", name);
+        }
+
+        var folder = Path.GetDirectoryName(Path.GetFullPath(session.FilePath)) ?? string.Empty;
+        var folderName = Path.GetFileName(folder);
+        return ($"folder:{folder}", UnknownDriver,
+            string.IsNullOrWhiteSpace(folderName) ? "No driver in file" : $"No driver in file · {folderName} folder",
+            folder);
+    }
+
+    public static string Resolve(
+        SessionInfo session, IReadOnlyDictionary<string, string> profileNames, IReadOnlyDictionary<string, string> mappings)
+    {
+        var (key, detectedName, _, _) = Identify(session, profileNames);
+        return mappings.TryGetValue(key, out var mapped) && !string.IsNullOrWhiteSpace(mapped)
+            ? mapped.Trim()
+            : detectedName;
+    }
+
+    // One row per driver source in the loaded sessions, plus saved mappings whose sessions aren't loaded right now.
+    public static IReadOnlyList<DriverAliasSetting> Build(
+        IEnumerable<SessionInfo> sessions, IReadOnlyDictionary<string, string> profileNames,
+        IReadOnlyDictionary<string, string> mappings)
+    {
+        var rows = sessions
+            .Select(session => Identify(session, profileNames))
+            .GroupBy(source => source.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(group =>
+            {
+                var source = group.First();
+                return new DriverAliasSetting(
+                    source.Key, source.DetectedName, source.Source, source.SourceDetail, group.Count(),
+                    mappings.TryGetValue(source.Key, out var mapped) ? mapped : string.Empty);
+            })
+            .ToList();
+        var present = new HashSet<string>(rows.Select(row => row.Key), StringComparer.OrdinalIgnoreCase);
+        rows.AddRange(mappings
+            .Where(pair => !present.Contains(pair.Key))
+            .Select(pair => new DriverAliasSetting(pair.Key, pair.Key[(pair.Key.IndexOf(':') + 1)..],
+                "Saved mapping (no sessions loaded)", pair.Key, 0, pair.Value)));
+        return rows
+            .OrderBy(row => row.DetectedName.Equals(UnknownDriver, StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .ThenBy(row => row.DetectedName, StringComparer.CurrentCultureIgnoreCase)
+            .ThenBy(row => row.Source, StringComparer.CurrentCultureIgnoreCase)
+            .ToArray();
+    }
 }
 
 internal sealed class TrackAliasSetting(string key, string alias, string defaultName, string name)

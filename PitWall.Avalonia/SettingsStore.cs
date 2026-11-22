@@ -31,6 +31,7 @@ internal static class SettingsStore
         SessionTrackAssignments = new Dictionary<string, string>(
             source.SessionTrackAssignments, StringComparer.OrdinalIgnoreCase),
         TrackMappings = new Dictionary<string, string>(source.TrackMappings, StringComparer.OrdinalIgnoreCase),
+        DriverMappings = new Dictionary<string, string>(source.DriverMappings, StringComparer.OrdinalIgnoreCase),
         ChartHeights = new Dictionary<string, double>(source.ChartHeights, StringComparer.OrdinalIgnoreCase)
     };
 
@@ -59,6 +60,7 @@ internal static class SettingsStore
                 settings.HiddenVehicleNames = settings.HiddenVehicleNames.Concat(loaded.HiddenVehicleNames ?? [])
                     .Distinct(StringComparer.CurrentCultureIgnoreCase).ToList();
                 Merge(settings.TrackMappings, loaded.TrackMappings);
+                Merge(settings.DriverMappings, loaded.DriverMappings);
                 Merge(settings.SessionLayoutAssignments, loaded.SessionLayoutAssignments);
                 Merge(settings.SessionTrackAssignments, loaded.SessionTrackAssignments);
                 Merge(settings.SessionVehicleMappings, loaded.SessionVehicleMappings);

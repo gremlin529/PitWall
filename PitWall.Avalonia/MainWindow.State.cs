@@ -196,6 +196,7 @@ public sealed partial class MainWindow
         !SameMap(before.SessionVehicleMappings, after.SessionVehicleMappings) ||
         !SameMap(before.SessionLayoutAssignments, after.SessionLayoutAssignments) ||
         !SameMap(before.TrackMappings, after.TrackMappings) ||
+        !SameMap(before.DriverMappings, after.DriverMappings) ||
         !new HashSet<string>(before.HiddenVehicleNames, StringComparer.CurrentCultureIgnoreCase)
             .SetEquals(after.HiddenVehicleNames);
 }

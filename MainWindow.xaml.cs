@@ -307,7 +307,9 @@ public partial class MainWindow : Window
             trackAliasItems,
             vehicleNames,
             _vehicleCatalog.Names,
-            pickerChannels)
+            pickerChannels,
+            DriverSources.Build(_sessions, _driverNames, _viewerSettings.DriverMappings),
+            _sessions.Select(GetDriverName))
         {
             Owner = this
         };
@@ -831,6 +833,14 @@ public partial class MainWindow : Window
                     if (!string.IsNullOrWhiteSpace(trackAlias) && !string.IsNullOrWhiteSpace(trackName))
                     {
                         _viewerSettings.TrackMappings[trackAlias] = trackName;
+                    }
+                }
+
+                foreach (var (driverKey, driverName) in loadedSettings.DriverMappings ?? [])
+                {
+                    if (!string.IsNullOrWhiteSpace(driverKey) && !string.IsNullOrWhiteSpace(driverName))
+                    {
+                        _viewerSettings.DriverMappings[driverKey] = driverName;
                     }
                 }
 
@@ -2544,9 +2554,24 @@ public partial class MainWindow : Window
                 return;
             }
 
-            _primaryTrace = primaryTask.Result;
-            _referenceTrace = referenceTask.Result;
             _segmentMap = await LoadSegmentMapAsync(GetMeanlinePath(primary.Session));
+            var loadedPrimaryTrace = primaryTask.Result;
+            if (referenceTask.Result is { } referenceTrace)
+            {
+                var trackLength = _segmentMap?.LengthM ?? _selectedLocation?.LengthM ?? 0;
+                if (!(trackLength > 0))
+                {
+                    trackLength = loadedPrimaryTrace.DistanceM;
+                }
+
+                _primaryTrace = NormalizeTraceDistance(loadedPrimaryTrace, trackLength);
+                _referenceTrace = NormalizeTraceDistance(referenceTrace, trackLength);
+            }
+            else
+            {
+                _primaryTrace = loadedPrimaryTrace;
+                _referenceTrace = null;
+            }
             if (generation != _loadGeneration)
             {
                 return;
@@ -2580,6 +2605,30 @@ public partial class MainWindow : Window
         {
             EndLoading();
         }
+    }
+
+    // GPS loggers can accumulate a different total distance from Catalyst even for the same lap. Keep each
+    // sample's fractional progress but place the lap on the selected layout's distance axis, so speed and
+    // acceleration traces do not gradually drift apart solely because the sources measured distance differently.
+    private static SessionTrace NormalizeTraceDistance(SessionTrace trace, double trackLengthM)
+    {
+        if (!(trackLengthM > 0) || trace.Points.Count < 2)
+        {
+            return trace;
+        }
+
+        var start = trace.Points[0].DistanceM;
+        var span = trace.Points[^1].DistanceM - start;
+        if (!(span > 0) || !double.IsFinite(span))
+        {
+            return trace;
+        }
+
+        var points = trace.Points.Select(point => point with
+        {
+            DistanceM = Math.Clamp((point.DistanceM - start) / span, 0, 1) * trackLengthM
+        }).ToArray();
+        return trace with { Points = points };
     }
 
     private string? GetMeanlinePath(SessionInfo session) =>
@@ -3239,11 +3288,7 @@ public partial class MainWindow : Window
     private string GetDriverName(SessionInfo session) => GetSessionEdits(session).DriverName;
 
     private string GetProfileDriverName(SessionInfo session) =>
-        _driverNames.TryGetValue(session.GarminGuid, out var driverName)
-            ? driverName
-            : string.IsNullOrWhiteSpace(session.AiMData?.DriverName)
-                ? "Unknown driver"
-                : session.AiMData.DriverName;
+        DriverSources.Resolve(session, _driverNames, _viewerSettings.DriverMappings);
 
     private IReadOnlyList<SessionLayoutChoice> BuildSessionLayoutChoices(SessionInfo session)
     {

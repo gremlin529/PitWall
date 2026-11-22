@@ -362,11 +362,7 @@ internal sealed class SessionModel
         Settings.HiddenVehicleNames.Contains(vehicleName, StringComparer.CurrentCultureIgnoreCase);
 
     public string GetProfileDriverName(SessionInfo session) =>
-        DriverNames.TryGetValue(session.GarminGuid, out var driverName)
-            ? driverName
-            : string.IsNullOrWhiteSpace(session.AiMData?.DriverName)
-                ? "Unknown driver"
-                : session.AiMData.DriverName;
+        DriverSources.Resolve(session, DriverNames, Settings.DriverMappings);
 
     public SessionEdits GetSessionEdits(SessionInfo session) =>
         Edits.TryGetValue(session.SessionGuid, out var edits)

@@ -577,7 +577,9 @@ public sealed partial class MainWindow
         ChannelSources.Apply(pickerChannels, ChannelSources.Discover(_model.Sessions));
         var dialog = new SettingsWindow(
             _model.Settings, aliases, _model.BuildTrackAliasSettings(), vehicleNames, _model.Catalog.Names,
-            pickerChannels);
+            pickerChannels,
+            DriverSources.Build(_model.Sessions, _model.DriverNames, _model.Settings.DriverMappings),
+            _model.Sessions.Select(_model.GetDriverName));
         if (await dialog.ShowDialog<ViewerSettings?>(this) is not { } updated ||
             !SaveSettings(updated, "Could not save settings"))
         {

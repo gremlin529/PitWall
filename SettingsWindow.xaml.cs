@@ -30,9 +30,21 @@ public partial class SettingsWindow : Window
         IEnumerable<TrackAliasSetting> trackAliases,
         IEnumerable<string> vehicleNames,
         IEnumerable<string> catalogVehicleNames,
-        IEnumerable<ChartChannelSetting> channels)
+        IEnumerable<ChartChannelSetting> channels,
+        IEnumerable<DriverAliasSetting> driverAliases,
+        IEnumerable<string> driverNames)
     {
         InitializeComponent();
+        _driverAliases = new ObservableCollection<DriverAliasSetting>(driverAliases);
+        DriverNames = new ObservableCollection<string>(driverNames
+            .Concat(_driverAliases.Select(alias => alias.DetectedName))
+            .Concat(_driverAliases.Select(alias => alias.Name))
+            .Where(name => !string.IsNullOrWhiteSpace(name) &&
+                           !name.Equals(DriverSources.UnknownDriver, StringComparison.OrdinalIgnoreCase))
+            .Select(name => name.Trim())
+            .Distinct(StringComparer.CurrentCultureIgnoreCase)
+            .OrderBy(name => name, StringComparer.CurrentCultureIgnoreCase));
+        DriverAliasList.ItemsSource = _driverAliases;
         _customVehicleNames = new HashSet<string>(settings.CustomVehicleNames, StringComparer.CurrentCultureIgnoreCase);
         _hiddenVehicleNames = new HashSet<string>(settings.HiddenVehicleNames, StringComparer.CurrentCultureIgnoreCase);
         var allVehicleNames = vehicleNames
@@ -68,6 +80,10 @@ public partial class SettingsWindow : Window
     }
 
     public ObservableCollection<string> VehicleNames { get; }
+
+    public ObservableCollection<string> DriverNames { get; }
+
+    private readonly ObservableCollection<DriverAliasSetting> _driverAliases;
 
     internal ViewerSettings Settings { get; private set; }
     internal IReadOnlyDictionary<string, string> VehicleRenames { get; private set; } =
@@ -304,8 +320,24 @@ public partial class SettingsWindow : Window
             }
         }
 
+        var driverMappings = new Dictionary<string, string>(
+            Settings.DriverMappings, StringComparer.OrdinalIgnoreCase);
+        foreach (var driver in _driverAliases)
+        {
+            var name = driver.Name.Trim();
+            if (string.IsNullOrWhiteSpace(name) || name.Equals(driver.DetectedName, StringComparison.Ordinal))
+            {
+                driverMappings.Remove(driver.Key);
+            }
+            else
+            {
+                driverMappings[driver.Key] = name;
+            }
+        }
+
         Settings = new ViewerSettings
         {
+            DriverMappings = driverMappings,
             DistanceUnits = DistanceUnitCombo.SelectedIndex == 1 ? "Imperial" : "Metric",
             CustomVehicleNames = _customVehicleNames
                 .Concat(renames.Values.Where(name => !_catalogVehicleNames.Contains(name)))

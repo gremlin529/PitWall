@@ -145,7 +145,7 @@
         </Grid.RowDefinitions>
         <StackPanel>
             <TextBlock Text="SETTINGS" FontSize="18" FontWeight="SemiBold"/>
-            <TextBlock Text="Choose distance units, organize cars, and rename or combine track layouts."
+            <TextBlock Text="Choose distance units, organize cars and drivers, and rename or combine track layouts."
                        Foreground="#94A0AD" FontSize="11" Margin="0,5,0,0"/>
         </StackPanel>
 
@@ -292,6 +292,49 @@
                             </DataTemplate>
                         </ListBox.ItemTemplate>
                     </ListBox>
+                </Grid>
+            </TabItem>
+            <TabItem Header="Drivers">
+                <Grid Margin="10">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <StackPanel Margin="0,0,0,8">
+                        <TextBlock Text="DRIVER NAMES" FontSize="10" FontWeight="Bold"
+                                   Foreground="#94A0AD"/>
+                        <TextBlock Text="Rename the driver for each source in the data; use the same name to combine drivers. Files with no driver are grouped by folder. Leave blank to keep the name from the data."
+                                   Foreground="#94A0AD" FontSize="10" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                    </StackPanel>
+                    <ListView x:Name="DriverAliasList" Grid.Row="1">
+                        <ListView.View>
+                            <GridView>
+                                <GridViewColumn Header="Driver from data" Width="140"
+                                                DisplayMemberBinding="{Binding DetectedName}"/>
+                                <GridViewColumn Header="Source" Width="230">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Source}" ToolTip="{Binding SourceDetail}"
+                                                       TextTrimming="CharacterEllipsis"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="Sessions" Width="65"
+                                                DisplayMemberBinding="{Binding SessionCount}"/>
+                                <GridViewColumn Header="Driver name in library" Width="230">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <ComboBox IsEditable="True" IsTextSearchEnabled="True"
+                                                      ItemsSource="{Binding DataContext.DriverNames,
+                                                          RelativeSource={RelativeSource AncestorType=Window}}"
+                                                      Text="{Binding Name, UpdateSourceTrigger=PropertyChanged}"
+                                                      MinWidth="200"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                            </GridView>
+                        </ListView.View>
+                    </ListView>
                 </Grid>
             </TabItem>
             <TabItem Header="Tracks">
