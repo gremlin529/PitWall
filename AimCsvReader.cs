@@ -109,7 +109,13 @@ internal static partial class TelemetryLoader
 
         var speedColumn = Find("GPS_Speed", "GPS Speed", "Speed", "PSH_VEH_SPEED");
         var headingColumn = Find("GPS_Heading", "GPS Heading", "Heading");
-        var longitudinalColumn = Find("Longitudinal_a", "GPS_LonAcc", "InlineAcc", "Longitudinal Acceleration");
+        // Older AiM CSV exports can contain a longitudinal accelerometer channel with a large gravity/installation
+        // offset (for example, ~+0.9 g at rest). Prefer the GPS-derived longitudinal channel when both are present;
+        // retain the accelerometer as a fallback for exports that do not include GPS_LonAcc.
+        var gpsLongitudinalColumn = Find("GPS_LonAcc", "GPS LonAcc");
+        var longitudinalColumn = gpsLongitudinalColumn >= 0
+            ? gpsLongitudinalColumn
+            : Find("Longitudinal_a", "InlineAcc", "Longitudinal Acceleration");
         var lateralColumn = Find("Lateral_acc", "GPS_LatAcc", "LateralAcc", "Lateral Acceleration");
         var timeColumn = Find("Time");
         if (speedColumn < 0 || headingColumn < 0)
@@ -140,7 +146,10 @@ internal static partial class TelemetryLoader
         double TimeSeconds(int row) => timeColumn >= 0 ? rows[row][timeColumn] : row * step;
 
         var speedFactor = SpeedToMetersPerSecond(units.ElementAtOrDefault(speedColumn));
-        AlignAccelerometerToGps(rows, longitudinalColumn, speedColumn, headingColumn, lateral: false);
+        if (gpsLongitudinalColumn < 0)
+        {
+            AlignAccelerometerToGps(rows, longitudinalColumn, speedColumn, headingColumn, lateral: false);
+        }
         AlignAccelerometerToGps(rows, lateralColumn, speedColumn, headingColumn, lateral: true);
         var venue = metadata.GetValueOrDefault("Venue")?.Trim();
         if (string.IsNullOrWhiteSpace(venue))

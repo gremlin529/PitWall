@@ -2702,8 +2702,7 @@ public partial class MainWindow : Window
                         point.SpeedMps * (UseImperialDistance ? 2.236936292 : 3.6))).ToArray(),
                     index == 0 ? PrimaryColor : ReferenceColor)).ToArray(),
                 "combined-g" => BuildCombinedGForceLines(traces),
-                "longitudinal-g" => BuildTelemetryLines(traces,
-                    point => point.LongitudinalG, "longitudinal"),
+                "longitudinal-g" => BuildLongitudinalGLines(traces),
                 "lateral-g" => BuildTelemetryLines(traces,
                     point => point.LateralG, "lateral"),
                 "delta-time" => _referenceTrace is null
@@ -2736,8 +2735,7 @@ public partial class MainWindow : Window
             lines.Add(new ChartLine($"{label} lateral", trace.Points
                 .Select(point => new ChartValue(point.DistanceM, point.LateralG)).ToArray(), color,
                 DeltaKey: "lateral"));
-            lines.Add(new ChartLine($"{label} longitudinal", trace.Points
-                .Select(point => new ChartValue(point.DistanceM, point.LongitudinalG)).ToArray(),
+            lines.Add(new ChartLine($"{label} longitudinal", GetLongitudinalGValues(trace),
                 color, Dashed: true, DeltaKey: "longitudinal"));
         }
 
@@ -2754,6 +2752,44 @@ public partial class MainWindow : Window
                 trace.Points.Select(point => new ChartValue(point.DistanceM, getValue(point))).ToArray(),
                 index == 0 ? PrimaryColor : ReferenceColor,
                 DeltaKey: label))
+            .ToArray();
+    }
+
+    private static IReadOnlyList<ChartLine> BuildLongitudinalGLines(IReadOnlyList<SessionTrace> traces) =>
+        traces.Select((trace, index) => new ChartLine(
+                $"{(index == 0 ? "Session" : "Reference")} longitudinal",
+                GetLongitudinalGValues(trace),
+                index == 0 ? PrimaryColor : ReferenceColor,
+                DeltaKey: "longitudinal"))
+            .ToArray();
+
+    private static IReadOnlyList<ChartValue> GetLongitudinalGValues(SessionTrace trace)
+    {
+        // Prefer AiM's recorded InlineAcc sensor channel when present. The point field for AiM currently comes
+        // from GPS-derived inline acceleration, which can carry speed-derivative bias compared with the sensor.
+        if (trace.Lap.Session.AiMData is { } aimData &&
+            trace.Lap.Index >= 0 && trace.Lap.Index < aimData.Laps.Count)
+        {
+            var channel = aimData.Laps[trace.Lap.Index].Channels.FirstOrDefault(candidate =>
+                candidate.Name.Equals("InlineAcc", StringComparison.OrdinalIgnoreCase) ||
+                candidate.Name.Equals("LongitudinalAcc", StringComparison.OrdinalIgnoreCase) ||
+                candidate.Name.Equals("LongAcc", StringComparison.OrdinalIgnoreCase));
+            var scale = channel?.Units.Trim().ToLowerInvariant() switch
+            {
+                "g" or "g-force" => 1d,
+                "m/s2" or "m/s^2" or "m/s²" => 1d / 9.80665,
+                _ => double.NaN
+            };
+            if (channel is not null && double.IsFinite(scale))
+            {
+                return trace.GetChannelValues(channel.Name)
+                    .Select(value => value with { Value = value.Value * scale })
+                    .ToArray();
+            }
+        }
+
+        return trace.Points
+            .Select(point => new ChartValue(point.DistanceM, point.LongitudinalG))
             .ToArray();
     }
 
