@@ -23,10 +23,22 @@ internal static partial class TelemetryLoader
         ["height"] = "m"
     };
 
+    // Longitudinal/lateral acceleration feed the built-in G-force graphs, so they are not listed again as channels.
     private static readonly HashSet<string> VboSkippedColumns = new(StringComparer.OrdinalIgnoreCase)
     {
         "sats", "time", "lat", "long", "velocity", "heading", "Tsample", "solution_type",
-        "avifileindex", "avitime", "VBOX_lapnumber", "VBOX_laptime"
+        "avifileindex", "avitime", "VBOX_lapnumber", "VBOX_laptime", "VBOX_accx", "VBOX_accy"
+    };
+
+    // RaceBox writes .vbo files with its own column names; map them onto the Racelogic names so sessions from
+    // either logger share channels and compare directly. Sign conventions already match (accx + when accelerating,
+    // accy − in a right-hand turn).
+    private static readonly Dictionary<string, string> RaceBoxColumnNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["lng"] = "long",
+        ["LongAcc"] = "VBOX_accx",
+        ["LatAcc"] = "VBOX_accy",
+        ["VertAcc"] = "VBOX_accz"
     };
 
     /// <summary>
@@ -44,6 +56,19 @@ internal static partial class TelemetryLoader
         }
 
         var names = lines[namesIndex + 1].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        var comments = ReadVboSection(lines, "comments");
+        var isRaceBox = comments.Any(line => line.Contains("RaceBox", StringComparison.OrdinalIgnoreCase)) ||
+                        names.Any(name => RaceBoxColumnNames.ContainsKey(name));
+        if (isRaceBox)
+        {
+            names = names
+                .Select(name => RaceBoxColumnNames.TryGetValue(name, out var mapped) &&
+                                !names.Contains(mapped, StringComparer.OrdinalIgnoreCase)
+                    ? mapped
+                    : name)
+                .ToArray();
+        }
+
         int Find(string name) => Array.FindIndex(names, candidate => candidate.Equals(name, StringComparison.OrdinalIgnoreCase));
         var timeColumn = Find("time");
         var latColumn = Find("lat");
@@ -109,13 +134,18 @@ internal static partial class TelemetryLoader
             .Where(column => rows.Any(row => row[column] != rows[0][column]))
             .ToArray();
 
+        // Lap numbers come from the logger's lap channel; files without one (RaceBox) are split on the
+        // [laptiming] start/finish line instead.
+        var lapNumbers = lapColumn >= 0
+            ? rows.Select(row => (int)row[lapColumn]).ToArray()
+            : SplitLapsOnStartLine(ReadVboSection(lines, "laptiming"), rows, latColumn, lonColumn, seconds);
         var ranges = new List<(int Start, int End, int Number)>();
         var rangeStart = 0;
         for (var index = 1; index <= rows.Count; index++)
         {
-            if (index == rows.Count || (lapColumn >= 0 && rows[index][lapColumn] != rows[index - 1][lapColumn]))
+            if (index == rows.Count || lapNumbers[index] != lapNumbers[index - 1])
             {
-                ranges.Add((rangeStart, index - 1, lapColumn >= 0 ? (int)rows[rangeStart][lapColumn] : 1));
+                ranges.Add((rangeStart, index - 1, lapNumbers[rangeStart]));
                 rangeStart = index;
             }
         }
@@ -165,13 +195,22 @@ internal static partial class TelemetryLoader
             throw new InvalidDataException($"No usable laps were found in {Path.GetFileName(filePath)}.");
         }
 
-        var venue = "VBOX track";
+        var venue = isRaceBox ? "RaceBox track" : "VBOX track";
         var driver = string.Empty;
         var vehicle = string.Empty;
         var startMeters = DistanceBetweenMeters(Latitude(0), Longitude(0), 36.5845, -121.7535);
+        var commentVenue = comments
+            .Select(line => line.Split(':', 2))
+            .Where(parts => parts.Length == 2 && parts[0].Trim().Equals("Venue", StringComparison.OrdinalIgnoreCase))
+            .Select(parts => parts[1].Trim())
+            .FirstOrDefault(value => value.Length > 0);
         if (startMeters < 20_000)
         {
             venue = "WeatherTech Raceway Laguna Seca";
+        }
+        else if (commentVenue is not null)
+        {
+            venue = CultureInfo.InvariantCulture.TextInfo.ToTitleCase(commentVenue);
         }
 
         var localStart = File.GetLastWriteTime(filePath);
@@ -237,5 +276,78 @@ internal static partial class TelemetryLoader
                 .ToArray();
             return new AiMSessionStream(points, channels);
         }
+    }
+
+    // Lines between "[name]" and the next section header, excluding blanks.
+    private static string[] ReadVboSection(string[] lines, string name)
+    {
+        var start = Array.FindIndex(lines, line => line.Trim().Equals($"[{name}]", StringComparison.OrdinalIgnoreCase));
+        if (start < 0)
+        {
+            return [];
+        }
+
+        return lines.Skip(start + 1)
+            .TakeWhile(line => !line.TrimStart().StartsWith('['))
+            .Where(line => !string.IsNullOrWhiteSpace(line))
+            .ToArray();
+    }
+
+    /// <summary>
+    /// Numbers each row by how many times the car has crossed the "Start" gate from [laptiming]
+    /// ("Start lat1 long1 lat2 long2", in minutes). Rows before the first crossing are lap 0.
+    /// Without a gate the whole file is lap 1.
+    /// </summary>
+    private static int[] SplitLapsOnStartLine(
+        string[] lapTiming, IReadOnlyList<double[]> rows, int latColumn, int lonColumn, double[] seconds)
+    {
+        var lapNumbers = new int[rows.Count];
+        var gate = lapTiming
+            .Select(line => line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+            .Where(parts => parts.Length >= 5 && parts[0].Equals("Start", StringComparison.OrdinalIgnoreCase))
+            .Select(parts => parts.Skip(1).Take(4)
+                .Select(text => double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var value)
+                    ? value
+                    : double.NaN)
+                .ToArray())
+            .FirstOrDefault(values => values.All(double.IsFinite));
+        if (gate is null)
+        {
+            Array.Fill(lapNumbers, 1);
+            return lapNumbers;
+        }
+
+        // Work in a local frame where both axes are in the same units (longitude minutes shrink with latitude),
+        // and widen the gate by half its length at each end so a slightly wide line still counts.
+        var scale = Math.Cos(gate[0] / 60 * Math.PI / 180);
+        (double X, double Y) Point(double latitude, double longitude) => (longitude * scale, latitude);
+        var a = Point(gate[0], gate[1]);
+        var b = Point(gate[2], gate[3]);
+        var (dx, dy) = (b.X - a.X, b.Y - a.Y);
+        a = (a.X - dx * 0.5, a.Y - dy * 0.5);
+        b = (b.X + dx * 0.5, b.Y + dy * 0.5);
+
+        static double Cross((double X, double Y) o, (double X, double Y) p, (double X, double Y) q) =>
+            (p.X - o.X) * (q.Y - o.Y) - (p.Y - o.Y) * (q.X - o.X);
+
+        const double minimumLapSeconds = 10;
+        var lap = 0;
+        var lastCrossing = double.NegativeInfinity;
+        for (var index = 1; index < rows.Count; index++)
+        {
+            var p = Point(rows[index - 1][latColumn], rows[index - 1][lonColumn]);
+            var q = Point(rows[index][latColumn], rows[index][lonColumn]);
+            var crosses = Math.Sign(Cross(a, b, p)) * Math.Sign(Cross(a, b, q)) < 0 &&
+                          Math.Sign(Cross(p, q, a)) * Math.Sign(Cross(p, q, b)) < 0;
+            if (crosses && seconds[index] - lastCrossing >= minimumLapSeconds)
+            {
+                lap++;
+                lastCrossing = seconds[index];
+            }
+
+            lapNumbers[index] = lap;
+        }
+
+        return lapNumbers;
     }
 }
